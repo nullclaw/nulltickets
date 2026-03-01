@@ -16,9 +16,22 @@ Useful runtime flags per role:
 - `--model` (for example `openrouter/anthropic/claude-sonnet-4`)
 - `--temperature`
 
-## 2. Create pipeline states with explicit `agent_role`
+## 2. Create pipelines with explicit `agent_role` (copy-paste)
 
-Example role mapping:
+Start `nullTracker` first:
+
+```bash
+cd /Users/igorsomov/Code/nullTracker
+zig build run -- --port 7700 --db runtime/tracker.db
+```
+
+In another terminal:
+
+```bash
+BASE="http://127.0.0.1:7700"
+```
+
+Role mapping used in this guide:
 
 - `llm-planner`
 - `llm-dev`
@@ -26,7 +39,121 @@ Example role mapping:
 - `llm-tester`
 - `llm-devops`
 
-Each state in pipeline `definition.states.*.agent_role` should match the worker role exactly.
+Important: `agent_role` is defined inside each state object in `definition.states`.
+Workers can claim only tasks whose current stage has matching `agent_role`.
+
+### 2.1 Create feature pipeline
+
+```bash
+FEATURE_PIPELINE_PAYLOAD='{
+  "name": "expense-feature-flow",
+  "definition": {
+    "initial": "backlog",
+    "states": {
+      "backlog": { "agent_role": "llm-planner", "description": "Task decomposition and acceptance criteria" },
+      "in_dev": { "agent_role": "llm-dev", "description": "Implementation" },
+      "review": { "agent_role": "llm-reviewer", "description": "Code and tests review" },
+      "qa_task": { "agent_role": "llm-tester", "description": "Task-level QA" },
+      "ready_for_release": { "terminal": true, "description": "Feature task accepted" }
+    },
+    "transitions": [
+      { "from": "backlog", "to": "in_dev", "trigger": "start_dev" },
+      { "from": "in_dev", "to": "review", "trigger": "submit_review" },
+      { "from": "review", "to": "in_dev", "trigger": "changes_requested" },
+      { "from": "review", "to": "qa_task", "trigger": "review_approved" },
+      { "from": "qa_task", "to": "in_dev", "trigger": "qa_failed" },
+      { "from": "qa_task", "to": "ready_for_release", "trigger": "qa_passed" }
+    ]
+  }
+}'
+
+FEATURE_PIPELINE_ID=$(curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d "$FEATURE_PIPELINE_PAYLOAD" \
+  "$BASE/pipelines" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+echo "FEATURE_PIPELINE_ID=$FEATURE_PIPELINE_ID"
+```
+
+### 2.2 Create release pipeline
+
+```bash
+RELEASE_PIPELINE_PAYLOAD='{
+  "name": "expense-release-flow",
+  "definition": {
+    "initial": "collect_ready",
+    "states": {
+      "collect_ready": { "agent_role": "llm-planner", "description": "Collect ready feature tasks" },
+      "release_qa": { "agent_role": "llm-tester", "description": "Release regression and smoke tests" },
+      "deploy": { "agent_role": "llm-devops", "description": "Build binaries and deploy" },
+      "released": { "terminal": true, "description": "Release complete" }
+    },
+    "transitions": [
+      { "from": "collect_ready", "to": "release_qa", "trigger": "all_tasks_ready" },
+      { "from": "release_qa", "to": "collect_ready", "trigger": "release_qa_failed" },
+      { "from": "release_qa", "to": "deploy", "trigger": "release_qa_passed" },
+      { "from": "deploy", "to": "released", "trigger": "deploy_done" }
+    ]
+  }
+}'
+
+RELEASE_PIPELINE_ID=$(curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d "$RELEASE_PIPELINE_PAYLOAD" \
+  "$BASE/pipelines" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+echo "RELEASE_PIPELINE_ID=$RELEASE_PIPELINE_ID"
+```
+
+### 2.3 Verify `agent_role` in stored pipeline
+
+```bash
+curl -s "$BASE/pipelines/$FEATURE_PIPELINE_ID" | python3 -c '
+import json,sys
+p=json.load(sys.stdin)
+print("backlog role:", p["definition"]["states"]["backlog"]["agent_role"])
+print("in_dev role:", p["definition"]["states"]["in_dev"]["agent_role"])
+print("review role:", p["definition"]["states"]["review"]["agent_role"])
+print("qa_task role:", p["definition"]["states"]["qa_task"]["agent_role"])
+'
+```
+
+Expected output:
+
+```text
+backlog role: llm-planner
+in_dev role: llm-dev
+review role: llm-reviewer
+qa_task role: llm-tester
+```
+
+### 2.4 Create feature and release tasks
+
+Create feature tasks:
+
+```bash
+for TITLE in \
+  "API skeleton + health endpoint" \
+  "Expense CRUD (DB + handlers)" \
+  "Categories and tags" \
+  "Monthly summary" \
+  "CSV export" \
+  "Auth middleware" \
+  "UI integration"
+do
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"pipeline_id\":\"$FEATURE_PIPELINE_ID\",\"title\":\"$TITLE\",\"description\":\"$TITLE for Expense Tracker MVP\",\"priority\":50,\"metadata\":{\"release\":\"2026.03\",\"acceptance_criteria\":[\"tests pass\",\"code reviewed\",\"qa passed\"]}}" \
+    "$BASE/tasks" >/dev/null
+done
+```
+
+Create one release task:
+
+```bash
+curl -s -X POST -H "Content-Type: application/json" \
+  -d "{\"pipeline_id\":\"$RELEASE_PIPELINE_ID\",\"title\":\"Release 2026.03\",\"description\":\"Run release QA, deploy and publish binary artifacts\",\"priority\":100,\"metadata\":{\"release\":\"2026.03\"}}" \
+  "$BASE/tasks"
+```
 
 ## 3. Run one worker process per role
 
