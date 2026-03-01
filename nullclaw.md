@@ -169,7 +169,7 @@ Each worker loop should:
 
 ## 4. Realistic Example: Expense Tracker App
 
-Project (neutral and practical):
+Project:
 
 - Build a small "Team Expense Tracker" application.
 - Stack example: API + SQLite + web UI/CLI.
@@ -198,6 +198,24 @@ Project (neutral and practical):
 - `llm-devops`:
   - builds binary artifacts
   - deploys release and verifies rollout
+
+### Generate MVP scope with one nullclaw prompt
+
+This is the fastest way to show the LLM value at project start.
+
+```bash
+cd /Users/igorsomov/Code/nullclaw
+zig-out/bin/nullclaw agent -m "дай мне MVP Scope для Team Expense Tracker (API + SQLite + web UI), с разбивкой на фичи и acceptance criteria" > /tmp/mvp_scope.md
+```
+
+If you prefer English prompt:
+
+```bash
+zig-out/bin/nullclaw agent -m "Give me MVP Scope for Team Expense Tracker (API + SQLite + web UI) with feature breakdown and acceptance criteria" > /tmp/mvp_scope.md
+```
+
+Then planner (`llm-planner`) converts `/tmp/mvp_scope.md` into separate tasks in `nullTracker` (one task per feature, plus one release task).
+This lets you go from idea to executable backlog in a few minutes.
 
 ### Pipeline A: Feature Task Flow
 
