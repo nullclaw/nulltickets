@@ -1,0 +1,17 @@
+.{
+    .name = .nulltracker,
+    .version = "0.1.0",
+    .fingerprint = 0x7559709b8e933727,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .sqlite3 = .{
+            .path = "deps/sqlite",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "deps",
+    },
+}

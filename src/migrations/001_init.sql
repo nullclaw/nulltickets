@@ -1,0 +1,73 @@
+-- nulltracker schema v1
+
+CREATE TABLE IF NOT EXISTS pipelines (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    definition_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    pipeline_id TEXT NOT NULL REFERENCES pipelines(id),
+    stage TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_stage ON tasks(stage);
+CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority DESC, created_at_ms ASC);
+CREATE INDEX IF NOT EXISTS idx_tasks_pipeline ON tasks(pipeline_id);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    attempt INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    agent_id TEXT,
+    agent_role TEXT,
+    started_at_ms INTEGER,
+    ended_at_ms INTEGER,
+    usage_json TEXT NOT NULL DEFAULT '{}',
+    error_text TEXT,
+    UNIQUE(task_id, attempt)
+);
+CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+
+CREATE TABLE IF NOT EXISTS leases (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    agent_id TEXT NOT NULL,
+    token_hash BLOB NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    last_heartbeat_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at_ms);
+CREATE INDEX IF NOT EXISTS idx_leases_run ON leases(run_id);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    ts_ms INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    data_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, id);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id),
+    run_id TEXT REFERENCES runs(id),
+    created_at_ms INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    uri TEXT NOT NULL,
+    sha256_hex TEXT,
+    size_bytes INTEGER,
+    meta_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
