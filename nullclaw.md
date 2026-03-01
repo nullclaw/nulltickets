@@ -205,12 +205,6 @@ This is the fastest way to show the LLM value at project start.
 
 ```bash
 cd /Users/igorsomov/Code/nullclaw
-zig-out/bin/nullclaw agent -m "дай мне MVP Scope для Team Expense Tracker (API + SQLite + web UI), с разбивкой на фичи и acceptance criteria" > /tmp/mvp_scope.md
-```
-
-If you prefer English prompt:
-
-```bash
 zig-out/bin/nullclaw agent -m "Give me MVP Scope for Team Expense Tracker (API + SQLite + web UI) with feature breakdown and acceptance criteria" > /tmp/mvp_scope.md
 ```
 
