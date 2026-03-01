@@ -155,13 +155,49 @@ curl -s -X POST -H "Content-Type: application/json" \
   "$BASE/tasks"
 ```
 
-## 3. Run one worker process per role
+## 3. Run role automation with nullclaw cron (Zig-native)
 
-Each worker loop should:
+Use cron agent jobs when you want scheduled role execution without wrapping model calls in bash.
+
+Requirements:
+
+- `nullclaw` build that includes `cron add-agent` and `cron once-agent`
+- (at the moment, this is available in the implementation branch and then in the next merged release)
+
+### 3.1 Example cron jobs by role
+
+```bash
+cd /Users/igorsomov/Code/nullclaw
+
+# Planner: refresh backlog every 15 minutes
+zig-out/bin/nullclaw cron add-agent "*/15 * * * *" \
+  "Role: llm-planner. Review open tasks for Expense Tracker and propose next backlog updates with acceptance criteria." \
+  --model "openrouter/anthropic/claude-sonnet-4"
+
+# Reviewer: periodic quality pass
+zig-out/bin/nullclaw cron add-agent "*/20 * * * *" \
+  "Role: llm-reviewer. Review recent completed feature work, verify tests/TDD quality, and list changes requested if needed." \
+  --model "openrouter/anthropic/claude-opus-4"
+
+# One-shot MVP scope generation
+zig-out/bin/nullclaw cron once-agent "30s" \
+  "Role: llm-planner. Give me MVP Scope for Team Expense Tracker (API + SQLite + web UI) with feature breakdown and acceptance criteria." \
+  --model "openrouter/anthropic/claude-sonnet-4"
+```
+
+Inspect jobs:
+
+```bash
+zig-out/bin/nullclaw cron list
+```
+
+### 3.2 Tracker executor contract
+
+For full `nullTracker` workflow execution, each role executor must still perform this API contract:
 
 1. `POST /leases/claim` with its `agent_id` and `agent_role`.
 2. If `204`, sleep and retry.
-3. If `200`, run `nullclaw agent -m "<prompt>"` to produce output.
+3. If `200`, run the role prompt and generate output.
 4. `POST /runs/{id}/events` to stream progress.
 5. `POST /artifacts` to store result file URI.
 6. `POST /runs/{id}/transition` with a valid trigger from `GET /tasks/{task_id}` `available_transitions`.
@@ -293,7 +329,10 @@ For the Expense Tracker MVP, `llm-planner` can create tasks like:
 
 Each feature task should include explicit acceptance criteria in `metadata`.
 
-## 5. Minimal worker example (bash)
+## 5. Tracker Executor Bridge (bash, current practical adapter)
+
+Use this when you want a complete end-to-end executor loop for `nullTracker` today.
+It bridges role claims/transitions and artifact writes through HTTP APIs.
 
 ```bash
 #!/usr/bin/env bash
