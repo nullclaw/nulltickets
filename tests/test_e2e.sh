@@ -74,6 +74,68 @@ BODY=$(echo "$RESP" | sed '$d')
 assert_status 200 "$CODE" "GET /health"
 assert_json "$BODY" "data['status']" "ok" "health status"
 
+# ===== 1.1 OpenAPI Discovery =====
+echo ""
+echo "=== 1.1 OpenAPI Discovery ==="
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/openapi.json")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "GET /openapi.json"
+assert_json "$BODY" "data['openapi']" "3.1.0" "openapi version"
+assert_json "$BODY" "\"/v1/traces\" in data['paths']" "True" "openapi exposes /v1/traces"
+
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/.well-known/openapi.json")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 200 "$CODE" "GET /.well-known/openapi.json"
+
+# ===== 1.2 OpenTelemetry OTLP =====
+echo ""
+echo "=== 1.2 OpenTelemetry OTLP ==="
+OTLP_JSON='{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "nulltracker-e2e" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "e2e", "version": "1.0.0" },
+          "spans": [
+            {
+              "traceId": "0123456789abcdef0123456789abcdef",
+              "spanId": "0123456789abcdef",
+              "name": "e2e.ingest",
+              "kind": 2,
+              "startTimeUnixNano": "1735689600000000000",
+              "endTimeUnixNano": "1735689601000000000",
+              "attributes": [
+                { "key": "nulltracker.run_id", "value": { "stringValue": "run-e2e" } },
+                { "key": "nulltracker.task_id", "value": { "stringValue": "task-e2e" } }
+              ],
+              "status": { "code": 1, "message": "ok" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}'
+RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "$OTLP_JSON" "$BASE/v1/traces")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "POST /v1/traces"
+assert_json "$BODY" "str(data['accepted_spans'])" "1" "OTLP json accepted 1 span"
+assert_json "$BODY" "data['stored']" "json" "OTLP json stored mode"
+
+RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/x-protobuf" --data-binary "abc" "$BASE/otlp/v1/traces")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "POST /otlp/v1/traces (protobuf)"
+assert_json "$BODY" "str(data['accepted_spans'])" "0" "OTLP protobuf accepted 0 parsed spans"
+assert_json "$BODY" "data['stored']" "blob" "OTLP protobuf stored mode"
+
 # ===== 2. Create Pipeline =====
 echo ""
 echo "=== 2. Create Pipeline ==="

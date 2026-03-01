@@ -5,6 +5,50 @@ const domain = @import("domain.zig");
 const log = std.log.scoped(.api);
 
 const version = "0.1.0";
+const openapi_spec = @embedFile("openapi.json");
+
+const OtlpKeyValue = struct {
+    key: []const u8,
+    value: std.json.Value,
+};
+
+const OtlpTraceSpan = struct {
+    traceId: ?[]const u8 = null,
+    spanId: ?[]const u8 = null,
+    parentSpanId: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    kind: ?std.json.Value = null,
+    startTimeUnixNano: ?[]const u8 = null,
+    endTimeUnixNano: ?[]const u8 = null,
+    attributes: ?[]const OtlpKeyValue = null,
+    status: ?struct {
+        code: ?std.json.Value = null,
+        message: ?[]const u8 = null,
+    } = null,
+};
+
+const OtlpScopeInfo = struct {
+    name: ?[]const u8 = null,
+    version: ?[]const u8 = null,
+};
+
+const OtlpScopeSpans = struct {
+    scope: ?OtlpScopeInfo = null,
+    instrumentationLibrary: ?OtlpScopeInfo = null,
+    spans: ?[]const OtlpTraceSpan = null,
+};
+
+const OtlpResourceSpan = struct {
+    resource: ?struct {
+        attributes: ?[]const OtlpKeyValue = null,
+    } = null,
+    scopeSpans: ?[]const OtlpScopeSpans = null,
+    instrumentationLibrarySpans: ?[]const OtlpScopeSpans = null,
+};
+
+const OtlpTraceExportRequest = struct {
+    resourceSpans: ?[]const OtlpResourceSpan = null,
+};
 
 pub const Context = struct {
     store: *Store,
@@ -28,6 +72,7 @@ pub fn handleRequest(
     const seg0 = getPathSegment(path.path, 0);
     const seg1 = getPathSegment(path.path, 1);
     const seg2 = getPathSegment(path.path, 2);
+    const seg3 = getPathSegment(path.path, 3);
 
     const is_get = std.mem.eql(u8, method, "GET");
     const is_post = std.mem.eql(u8, method, "POST");
@@ -35,6 +80,22 @@ pub fn handleRequest(
     // GET /health
     if (is_get and eql(seg0, "health") and seg1 == null) {
         return handleHealth(ctx);
+    }
+
+    // OpenAPI discovery
+    if (is_get and eql(seg0, "openapi.json") and seg1 == null) {
+        return handleOpenApi();
+    }
+    if (is_get and eql(seg0, ".well-known") and eql(seg1, "openapi.json") and seg2 == null) {
+        return handleOpenApi();
+    }
+
+    // OpenTelemetry OTLP traces ingest
+    if (is_post and eql(seg0, "v1") and eql(seg1, "traces") and seg2 == null) {
+        return handleOtlpTraces(ctx, body, raw_request);
+    }
+    if (is_post and eql(seg0, "otlp") and eql(seg1, "v1") and eql(seg2, "traces") and seg3 == null) {
+        return handleOtlpTraces(ctx, body, raw_request);
     }
 
     // Pipelines
@@ -100,6 +161,183 @@ fn handleHealth(ctx: *Context) HttpResponse {
     w.writeAll("}") catch return serverError(ctx.allocator);
 
     return .{ .status = "200 OK", .body = buf.items };
+}
+
+fn handleOpenApi() HttpResponse {
+    return .{ .status = "200 OK", .body = openapi_spec };
+}
+
+fn handleOtlpTraces(ctx: *Context, body: []const u8, raw_request: []const u8) HttpResponse {
+    const content_type_raw = extractHeader(raw_request, "Content-Type") orelse "application/x-protobuf";
+    const content_type = normalizeContentType(content_type_raw);
+
+    if (!isJsonContentType(content_type)) {
+        const batch_id = ctx.store.addOtlpBatchBlob(content_type, body) catch return serverError(ctx.allocator);
+        const resp = std.fmt.allocPrint(
+            ctx.allocator,
+            "{{\"batch_id\":{d},\"accepted_spans\":0,\"stored\":\"blob\"}}",
+            .{batch_id},
+        ) catch return serverError(ctx.allocator);
+        return .{ .status = "200 OK", .body = resp };
+    }
+
+    var parsed = std.json.parseFromSlice(OtlpTraceExportRequest, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return respondError(ctx.allocator, 400, "invalid_json", "Invalid OTLP JSON payload");
+    };
+    defer parsed.deinit();
+
+    ctx.store.execSimple("BEGIN IMMEDIATE;") catch return serverError(ctx.allocator);
+    var should_rollback = true;
+    defer if (should_rollback) ctx.store.execSimple("ROLLBACK;") catch {};
+
+    const batch_id = ctx.store.addOtlpBatchJson(content_type, body, 0) catch return serverError(ctx.allocator);
+    var accepted_spans: i64 = 0;
+
+    const resource_spans = parsed.value.resourceSpans orelse @as([]const OtlpResourceSpan, &.{});
+    for (resource_spans) |resource_span| {
+        const resource_attributes: []const OtlpKeyValue = if (resource_span.resource) |resource| (resource.attributes orelse &.{}) else &.{};
+        const resource_attributes_json = otlpAttributesJson(ctx.allocator, resource_attributes) catch return serverError(ctx.allocator);
+        const resource_run_id = getOtlpAttributeText(ctx.allocator, resource_attributes, "nulltracker.run_id") catch return serverError(ctx.allocator);
+        const resource_task_id = getOtlpAttributeText(ctx.allocator, resource_attributes, "nulltracker.task_id") catch return serverError(ctx.allocator);
+
+        if (resource_span.scopeSpans) |scope_spans| {
+            ingestOtlpScopeSpans(
+                ctx,
+                batch_id,
+                resource_attributes_json,
+                scope_spans,
+                resource_run_id,
+                resource_task_id,
+                &accepted_spans,
+            ) catch return serverError(ctx.allocator);
+        }
+        if (resource_span.instrumentationLibrarySpans) |scope_spans| {
+            ingestOtlpScopeSpans(
+                ctx,
+                batch_id,
+                resource_attributes_json,
+                scope_spans,
+                resource_run_id,
+                resource_task_id,
+                &accepted_spans,
+            ) catch return serverError(ctx.allocator);
+        }
+    }
+
+    ctx.store.updateOtlpBatchParsedSpans(batch_id, accepted_spans) catch return serverError(ctx.allocator);
+    ctx.store.execSimple("COMMIT;") catch return serverError(ctx.allocator);
+    should_rollback = false;
+
+    const resp = std.fmt.allocPrint(
+        ctx.allocator,
+        "{{\"batch_id\":{d},\"accepted_spans\":{d},\"stored\":\"json\"}}",
+        .{ batch_id, accepted_spans },
+    ) catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = resp };
+}
+
+fn ingestOtlpScopeSpans(
+    ctx: *Context,
+    batch_id: i64,
+    resource_attributes_json: []const u8,
+    scope_spans: []const OtlpScopeSpans,
+    resource_run_id: ?[]const u8,
+    resource_task_id: ?[]const u8,
+    accepted_spans: *i64,
+) !void {
+    for (scope_spans) |scope_span| {
+        const scope_name = if (scope_span.scope) |scope| scope.name else if (scope_span.instrumentationLibrary) |scope| scope.name else null;
+        const scope_version = if (scope_span.scope) |scope| scope.version else if (scope_span.instrumentationLibrary) |scope| scope.version else null;
+        const spans = scope_span.spans orelse @as([]const OtlpTraceSpan, &.{});
+        for (spans) |span| {
+            const trace_id = span.traceId orelse continue;
+            const span_id = span.spanId orelse continue;
+            const span_name = span.name orelse "unnamed";
+            const attributes = span.attributes orelse @as([]const OtlpKeyValue, &.{});
+
+            const attributes_json = try otlpAttributesJson(ctx.allocator, attributes);
+            const raw_json = try std.json.Stringify.valueAlloc(ctx.allocator, span, .{});
+            const kind = if (span.kind) |value| try jsonValueToText(ctx.allocator, value) else null;
+            const status_code = if (span.status) |status| if (status.code) |code| try jsonValueToText(ctx.allocator, code) else null else null;
+            const status_message = if (span.status) |status| status.message else null;
+            const run_id = (try getOtlpAttributeText(ctx.allocator, attributes, "nulltracker.run_id")) orelse resource_run_id;
+            const task_id = (try getOtlpAttributeText(ctx.allocator, attributes, "nulltracker.task_id")) orelse resource_task_id;
+
+            try ctx.store.addOtlpSpan(batch_id, .{
+                .trace_id = trace_id,
+                .span_id = span_id,
+                .parent_span_id = span.parentSpanId,
+                .name = span_name,
+                .kind = kind,
+                .start_time_unix_nano = parseUnixNano(span.startTimeUnixNano),
+                .end_time_unix_nano = parseUnixNano(span.endTimeUnixNano),
+                .status_code = status_code,
+                .status_message = status_message,
+                .attributes_json = attributes_json,
+                .resource_attributes_json = resource_attributes_json,
+                .scope_name = scope_name,
+                .scope_version = scope_version,
+                .run_id = run_id,
+                .task_id = task_id,
+                .raw_json = raw_json,
+            });
+            accepted_spans.* += 1;
+        }
+    }
+}
+
+fn otlpAttributesJson(allocator: std.mem.Allocator, attributes: []const OtlpKeyValue) ![]const u8 {
+    if (attributes.len == 0) return "[]";
+    return std.json.Stringify.valueAlloc(allocator, attributes, .{});
+}
+
+fn getOtlpAttributeText(allocator: std.mem.Allocator, attributes: []const OtlpKeyValue, key: []const u8) !?[]const u8 {
+    for (attributes) |attr| {
+        if (std.mem.eql(u8, attr.key, key)) {
+            return try otlpAnyValueToText(allocator, attr.value);
+        }
+    }
+    return null;
+}
+
+fn otlpAnyValueToText(allocator: std.mem.Allocator, value: std.json.Value) !?[]const u8 {
+    switch (value) {
+        .object => |obj| {
+            if (obj.get("stringValue")) |v| return try jsonValueToText(allocator, v);
+            if (obj.get("intValue")) |v| return try jsonValueToText(allocator, v);
+            if (obj.get("doubleValue")) |v| return try jsonValueToText(allocator, v);
+            if (obj.get("boolValue")) |v| return try jsonValueToText(allocator, v);
+            if (obj.get("bytesValue")) |v| return try jsonValueToText(allocator, v);
+            return try std.json.Stringify.valueAlloc(allocator, value, .{});
+        },
+        else => return try jsonValueToText(allocator, value),
+    }
+}
+
+fn jsonValueToText(allocator: std.mem.Allocator, value: std.json.Value) !?[]const u8 {
+    return switch (value) {
+        .null => null,
+        .string => |v| v,
+        .number_string => |v| v,
+        .integer => |v| try std.fmt.allocPrint(allocator, "{d}", .{v}),
+        .float => |v| try std.fmt.allocPrint(allocator, "{d}", .{v}),
+        .bool => |v| if (v) "true" else "false",
+        else => try std.json.Stringify.valueAlloc(allocator, value, .{}),
+    };
+}
+
+fn parseUnixNano(value: ?[]const u8) ?i64 {
+    const raw = value orelse return null;
+    return std.fmt.parseInt(i64, raw, 10) catch null;
+}
+
+fn normalizeContentType(value: []const u8) []const u8 {
+    const ct = if (std.mem.indexOfScalar(u8, value, ';')) |idx| value[0..idx] else value;
+    return std.mem.trim(u8, ct, " \t");
+}
+
+fn isJsonContentType(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "application/json");
 }
 
 fn handleCreatePipeline(ctx: *Context, body: []const u8) HttpResponse {

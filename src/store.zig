@@ -85,6 +85,25 @@ pub const TransitionResult = struct {
     trigger: []const u8,
 };
 
+pub const OtlpSpanInsert = struct {
+    trace_id: []const u8,
+    span_id: []const u8,
+    parent_span_id: ?[]const u8 = null,
+    name: []const u8,
+    kind: ?[]const u8 = null,
+    start_time_unix_nano: ?i64 = null,
+    end_time_unix_nano: ?i64 = null,
+    status_code: ?[]const u8 = null,
+    status_message: ?[]const u8 = null,
+    attributes_json: []const u8,
+    resource_attributes_json: []const u8,
+    scope_name: ?[]const u8 = null,
+    scope_version: ?[]const u8 = null,
+    run_id: ?[]const u8 = null,
+    task_id: ?[]const u8 = null,
+    raw_json: []const u8,
+};
+
 pub const Store = struct {
     db: ?*c.sqlite3,
     allocator: std.mem.Allocator,
@@ -884,6 +903,64 @@ pub const Store = struct {
             self.allocator.free(row.meta_json);
         }
         self.allocator.free(rows);
+    }
+
+    // ===== OpenTelemetry =====
+
+    pub fn addOtlpBatchJson(self: *Self, content_type: []const u8, payload_json: []const u8, parsed_spans: i64) !i64 {
+        const stmt = try self.prepare("INSERT INTO otlp_batches (received_at_ms, content_type, payload_json, parsed_spans) VALUES (?, ?, ?, ?);");
+        defer _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_bind_int64(stmt, 1, ids.nowMs());
+        self.bindText(stmt, 2, content_type);
+        self.bindText(stmt, 3, payload_json);
+        _ = c.sqlite3_bind_int64(stmt, 4, parsed_spans);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.InsertFailed;
+        return c.sqlite3_last_insert_rowid(self.db);
+    }
+
+    pub fn addOtlpBatchBlob(self: *Self, content_type: []const u8, payload_blob: []const u8) !i64 {
+        const stmt = try self.prepare("INSERT INTO otlp_batches (received_at_ms, content_type, payload_blob, parsed_spans) VALUES (?, ?, ?, 0);");
+        defer _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_bind_int64(stmt, 1, ids.nowMs());
+        self.bindText(stmt, 2, content_type);
+        _ = c.sqlite3_bind_blob(stmt, 3, payload_blob.ptr, @intCast(payload_blob.len), SQLITE_STATIC);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.InsertFailed;
+        return c.sqlite3_last_insert_rowid(self.db);
+    }
+
+    pub fn updateOtlpBatchParsedSpans(self: *Self, batch_id: i64, parsed_spans: i64) !void {
+        const stmt = try self.prepare("UPDATE otlp_batches SET parsed_spans = ? WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_bind_int64(stmt, 1, parsed_spans);
+        _ = c.sqlite3_bind_int64(stmt, 2, batch_id);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.UpdateFailed;
+    }
+
+    pub fn addOtlpSpan(self: *Self, batch_id: i64, span: OtlpSpanInsert) !void {
+        const stmt = try self.prepare(
+            "INSERT INTO otlp_spans (batch_id, trace_id, span_id, parent_span_id, name, kind, start_time_unix_nano, end_time_unix_nano, status_code, status_message, attributes_json, resource_attributes_json, scope_name, scope_version, run_id, task_id, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        );
+        defer _ = c.sqlite3_finalize(stmt);
+
+        _ = c.sqlite3_bind_int64(stmt, 1, batch_id);
+        self.bindText(stmt, 2, span.trace_id);
+        self.bindText(stmt, 3, span.span_id);
+        if (span.parent_span_id) |v| self.bindText(stmt, 4, v) else _ = c.sqlite3_bind_null(stmt, 4);
+        self.bindText(stmt, 5, span.name);
+        if (span.kind) |v| self.bindText(stmt, 6, v) else _ = c.sqlite3_bind_null(stmt, 6);
+        if (span.start_time_unix_nano) |v| _ = c.sqlite3_bind_int64(stmt, 7, v) else _ = c.sqlite3_bind_null(stmt, 7);
+        if (span.end_time_unix_nano) |v| _ = c.sqlite3_bind_int64(stmt, 8, v) else _ = c.sqlite3_bind_null(stmt, 8);
+        if (span.status_code) |v| self.bindText(stmt, 9, v) else _ = c.sqlite3_bind_null(stmt, 9);
+        if (span.status_message) |v| self.bindText(stmt, 10, v) else _ = c.sqlite3_bind_null(stmt, 10);
+        self.bindText(stmt, 11, span.attributes_json);
+        self.bindText(stmt, 12, span.resource_attributes_json);
+        if (span.scope_name) |v| self.bindText(stmt, 13, v) else _ = c.sqlite3_bind_null(stmt, 13);
+        if (span.scope_version) |v| self.bindText(stmt, 14, v) else _ = c.sqlite3_bind_null(stmt, 14);
+        if (span.run_id) |v| self.bindText(stmt, 15, v) else _ = c.sqlite3_bind_null(stmt, 15);
+        if (span.task_id) |v| self.bindText(stmt, 16, v) else _ = c.sqlite3_bind_null(stmt, 16);
+        self.bindText(stmt, 17, span.raw_json);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.InsertFailed;
     }
 
     // ===== Artifacts =====

@@ -71,3 +71,38 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
+
+CREATE TABLE IF NOT EXISTS otlp_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at_ms INTEGER NOT NULL,
+    content_type TEXT NOT NULL,
+    payload_json TEXT,
+    payload_blob BLOB,
+    parsed_spans INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_otlp_batches_received ON otlp_batches(received_at_ms DESC);
+
+CREATE TABLE IF NOT EXISTS otlp_spans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES otlp_batches(id),
+    trace_id TEXT NOT NULL,
+    span_id TEXT NOT NULL,
+    parent_span_id TEXT,
+    name TEXT NOT NULL,
+    kind TEXT,
+    start_time_unix_nano INTEGER,
+    end_time_unix_nano INTEGER,
+    status_code TEXT,
+    status_message TEXT,
+    attributes_json TEXT NOT NULL DEFAULT '[]',
+    resource_attributes_json TEXT NOT NULL DEFAULT '[]',
+    scope_name TEXT,
+    scope_version TEXT,
+    run_id TEXT,
+    task_id TEXT,
+    raw_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_otlp_spans_trace ON otlp_spans(trace_id);
+CREATE INDEX IF NOT EXISTS idx_otlp_spans_run ON otlp_spans(run_id);
+CREATE INDEX IF NOT EXISTS idx_otlp_spans_task ON otlp_spans(task_id);
+CREATE INDEX IF NOT EXISTS idx_otlp_spans_batch ON otlp_spans(batch_id);

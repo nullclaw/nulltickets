@@ -1,0 +1,957 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "nullTracker API",
+    "version": "0.1.0",
+    "description": "Headless task tracker API for autonomous AI agents. Use this schema for agent-side integration and tool generation."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:7700"
+    }
+  ],
+  "tags": [
+    { "name": "discovery" },
+    { "name": "telemetry" },
+    { "name": "health" },
+    { "name": "pipelines" },
+    { "name": "tasks" },
+    { "name": "leases" },
+    { "name": "runs" },
+    { "name": "artifacts" }
+  ],
+  "paths": {
+    "/openapi.json": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "Get OpenAPI schema",
+        "operationId": "getOpenApi",
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/openapi.json": {
+      "get": {
+        "tags": ["discovery"],
+        "summary": "Get OpenAPI schema (well-known path)",
+        "operationId": "getOpenApiWellKnown",
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/traces": {
+      "post": {
+        "tags": ["telemetry"],
+        "summary": "Ingest OTLP traces",
+        "operationId": "ingestOtlpTraces",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "OTLP ExportTraceServiceRequest JSON payload."
+              }
+            },
+            "application/x-protobuf": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Payload accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpIngestResponse"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/otlp/v1/traces": {
+      "post": {
+        "tags": ["telemetry"],
+        "summary": "Ingest OTLP traces (collector path)",
+        "operationId": "ingestOtlpTracesCollector",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "OTLP ExportTraceServiceRequest JSON payload."
+              }
+            },
+            "application/x-protobuf": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Payload accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpIngestResponse"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["health"],
+        "summary": "Service health",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Health response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/pipelines": {
+      "post": {
+        "tags": ["pipelines"],
+        "summary": "Create pipeline",
+        "operationId": "createPipeline",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PipelineCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdResponse"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "409": { "$ref": "#/components/responses/Error409" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      },
+      "get": {
+        "tags": ["pipelines"],
+        "summary": "List pipelines",
+        "operationId": "listPipelines",
+        "responses": {
+          "200": {
+            "description": "Pipeline list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Pipeline"
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/pipelines/{id}": {
+      "get": {
+        "tags": ["pipelines"],
+        "summary": "Get pipeline by id",
+        "operationId": "getPipeline",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pipeline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pipeline"
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error404" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/tasks": {
+      "post": {
+        "tags": ["tasks"],
+        "summary": "Create task",
+        "operationId": "createTask",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdResponse"
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error404" },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      },
+      "get": {
+        "tags": ["tasks"],
+        "summary": "List tasks",
+        "operationId": "listTasks",
+        "parameters": [
+          { "name": "stage", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "pipeline_id", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Task"
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/tasks/{id}": {
+      "get": {
+        "tags": ["tasks"],
+        "summary": "Get task by id",
+        "operationId": "getTask",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskDetails"
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/Error404" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/leases/claim": {
+      "post": {
+        "tags": ["leases"],
+        "summary": "Claim next task by role",
+        "operationId": "claimTask",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeaseClaimRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Claimed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimResponse"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No available task"
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/leases/{id}/heartbeat": {
+      "post": {
+        "tags": ["leases"],
+        "summary": "Heartbeat lease",
+        "operationId": "heartbeatLease",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Heartbeat accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeartbeatResponse"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Error401" },
+          "404": { "$ref": "#/components/responses/Error404" },
+          "410": { "$ref": "#/components/responses/Error410" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/runs/{id}/events": {
+      "post": {
+        "tags": ["runs"],
+        "summary": "Append run event",
+        "operationId": "addRunEvent",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Event created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["id"],
+                  "properties": {
+                    "id": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Error401" },
+          "404": { "$ref": "#/components/responses/Error404" },
+          "410": { "$ref": "#/components/responses/Error410" },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      },
+      "get": {
+        "tags": ["runs"],
+        "summary": "List run events",
+        "operationId": "listRunEvents",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunEvent"
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/runs/{id}/transition": {
+      "post": {
+        "tags": ["runs"],
+        "summary": "Transition run and task stage",
+        "operationId": "transitionRun",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransitionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transition completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransitionResponse"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "401": { "$ref": "#/components/responses/Error401" },
+          "404": { "$ref": "#/components/responses/Error404" },
+          "409": { "$ref": "#/components/responses/Error409" },
+          "410": { "$ref": "#/components/responses/Error410" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/runs/{id}/fail": {
+      "post": {
+        "tags": ["runs"],
+        "summary": "Fail run",
+        "operationId": "failRun",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FailRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Run failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status"],
+                  "properties": {
+                    "status": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "401": { "$ref": "#/components/responses/Error401" },
+          "404": { "$ref": "#/components/responses/Error404" },
+          "410": { "$ref": "#/components/responses/Error410" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    },
+    "/artifacts": {
+      "post": {
+        "tags": ["artifacts"],
+        "summary": "Create artifact",
+        "operationId": "createArtifact",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdResponse"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      },
+      "get": {
+        "tags": ["artifacts"],
+        "summary": "List artifacts",
+        "operationId": "listArtifacts",
+        "parameters": [
+          { "name": "task_id", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "run_id", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Artifact list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Artifact"
+                  }
+                }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/Error500" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "token"
+      }
+    },
+    "responses": {
+      "Error400": {
+        "description": "Bad Request",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Error401": {
+        "description": "Unauthorized",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Error404": {
+        "description": "Not Found",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Error409": {
+        "description": "Conflict",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Error410": {
+        "description": "Gone",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "Error500": {
+        "description": "Internal Server Error",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      },
+      "IdResponse": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" }
+        }
+      },
+      "HealthStageCount": {
+        "type": "object",
+        "required": ["stage", "count"],
+        "properties": {
+          "stage": { "type": "string" },
+          "count": { "type": "integer" }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status", "version", "tasks_by_stage", "active_leases"],
+        "properties": {
+          "status": { "type": "string" },
+          "version": { "type": "string" },
+          "tasks_by_stage": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/HealthStageCount" }
+          },
+          "active_leases": { "type": "integer" }
+        }
+      },
+      "OtlpIngestResponse": {
+        "type": "object",
+        "required": ["batch_id", "accepted_spans", "stored"],
+        "properties": {
+          "batch_id": { "type": "integer" },
+          "accepted_spans": { "type": "integer" },
+          "stored": { "type": "string", "enum": ["json", "blob"] }
+        }
+      },
+      "PipelineStateDef": {
+        "type": "object",
+        "properties": {
+          "agent_role": { "type": "string" },
+          "description": { "type": "string" },
+          "terminal": { "type": "boolean" }
+        }
+      },
+      "PipelineTransitionDef": {
+        "type": "object",
+        "required": ["from", "to", "trigger"],
+        "properties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "trigger": { "type": "string" },
+          "instructions": { "type": "string" }
+        }
+      },
+      "PipelineDefinition": {
+        "type": "object",
+        "required": ["initial", "states", "transitions"],
+        "properties": {
+          "initial": { "type": "string" },
+          "states": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/components/schemas/PipelineStateDef" }
+          },
+          "transitions": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PipelineTransitionDef" }
+          }
+        }
+      },
+      "PipelineCreateRequest": {
+        "type": "object",
+        "required": ["name", "definition"],
+        "properties": {
+          "name": { "type": "string" },
+          "definition": { "$ref": "#/components/schemas/PipelineDefinition" }
+        }
+      },
+      "Pipeline": {
+        "type": "object",
+        "required": ["id", "name", "definition", "created_at_ms"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "definition": { "$ref": "#/components/schemas/PipelineDefinition" },
+          "created_at_ms": { "type": "integer" }
+        }
+      },
+      "TaskCreateRequest": {
+        "type": "object",
+        "required": ["pipeline_id", "title", "description"],
+        "properties": {
+          "pipeline_id": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "priority": { "type": "integer" },
+          "metadata": {}
+        }
+      },
+      "Task": {
+        "type": "object",
+        "required": [
+          "id",
+          "pipeline_id",
+          "stage",
+          "title",
+          "description",
+          "priority",
+          "metadata",
+          "created_at_ms",
+          "updated_at_ms"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "pipeline_id": { "type": "string" },
+          "stage": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "priority": { "type": "integer" },
+          "metadata": {},
+          "created_at_ms": { "type": "integer" },
+          "updated_at_ms": { "type": "integer" }
+        }
+      },
+      "Run": {
+        "type": "object",
+        "required": ["id", "task_id", "attempt", "status", "agent_id", "agent_role", "started_at_ms", "ended_at_ms"],
+        "properties": {
+          "id": { "type": "string" },
+          "task_id": { "type": "string" },
+          "attempt": { "type": "integer" },
+          "status": { "type": "string" },
+          "agent_id": { "type": ["string", "null"] },
+          "agent_role": { "type": ["string", "null"] },
+          "started_at_ms": { "type": ["integer", "null"] },
+          "ended_at_ms": { "type": ["integer", "null"] }
+        }
+      },
+      "AvailableTransition": {
+        "type": "object",
+        "required": ["trigger", "to"],
+        "properties": {
+          "trigger": { "type": "string" },
+          "to": { "type": "string" }
+        }
+      },
+      "TaskDetails": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Task" },
+          {
+            "type": "object",
+            "properties": {
+              "latest_run": {
+                "oneOf": [
+                  { "$ref": "#/components/schemas/Run" },
+                  { "type": "null" }
+                ]
+              },
+              "available_transitions": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/AvailableTransition" }
+              }
+            }
+          }
+        ]
+      },
+      "LeaseClaimRequest": {
+        "type": "object",
+        "required": ["agent_id", "agent_role"],
+        "properties": {
+          "agent_id": { "type": "string" },
+          "agent_role": { "type": "string" },
+          "lease_ttl_ms": { "type": "integer" }
+        }
+      },
+      "ClaimResponse": {
+        "type": "object",
+        "required": ["task", "run", "lease_id", "lease_token", "expires_at_ms"],
+        "properties": {
+          "task": { "$ref": "#/components/schemas/Task" },
+          "run": { "$ref": "#/components/schemas/Run" },
+          "lease_id": { "type": "string" },
+          "lease_token": { "type": "string" },
+          "expires_at_ms": { "type": "integer" }
+        }
+      },
+      "HeartbeatResponse": {
+        "type": "object",
+        "required": ["expires_at_ms"],
+        "properties": {
+          "expires_at_ms": { "type": "integer" }
+        }
+      },
+      "EventCreateRequest": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+          "kind": { "type": "string" },
+          "data": {}
+        }
+      },
+      "RunEvent": {
+        "type": "object",
+        "required": ["id", "run_id", "ts_ms", "kind", "data"],
+        "properties": {
+          "id": { "type": "integer" },
+          "run_id": { "type": "string" },
+          "ts_ms": { "type": "integer" },
+          "kind": { "type": "string" },
+          "data": {}
+        }
+      },
+      "TransitionRequest": {
+        "type": "object",
+        "required": ["trigger"],
+        "properties": {
+          "trigger": { "type": "string" },
+          "instructions": { "type": "string" },
+          "usage": {}
+        }
+      },
+      "TransitionResponse": {
+        "type": "object",
+        "required": ["previous_stage", "new_stage", "trigger"],
+        "properties": {
+          "previous_stage": { "type": "string" },
+          "new_stage": { "type": "string" },
+          "trigger": { "type": "string" }
+        }
+      },
+      "FailRequest": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "usage": {}
+        }
+      },
+      "ArtifactCreateRequest": {
+        "type": "object",
+        "required": ["kind", "uri"],
+        "properties": {
+          "task_id": { "type": "string" },
+          "run_id": { "type": "string" },
+          "kind": { "type": "string" },
+          "uri": { "type": "string" },
+          "sha256": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "meta": {}
+        }
+      },
+      "Artifact": {
+        "type": "object",
+        "required": ["id", "task_id", "run_id", "created_at_ms", "kind", "uri", "sha256", "size_bytes", "meta"],
+        "properties": {
+          "id": { "type": "string" },
+          "task_id": { "type": ["string", "null"] },
+          "run_id": { "type": ["string", "null"] },
+          "created_at_ms": { "type": "integer" },
+          "kind": { "type": "string" },
+          "uri": { "type": "string" },
+          "sha256": { "type": ["string", "null"] },
+          "size_bytes": { "type": ["integer", "null"] },
+          "meta": {}
+        }
+      }
+    }
+  }
+}

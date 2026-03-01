@@ -6,6 +6,46 @@
 - Time values: Unix milliseconds
 - Auth: `Authorization: Bearer <lease_token>` for lease-protected endpoints
 
+## Discovery
+
+### `GET /openapi.json`
+
+Returns the full OpenAPI 3.1 document for machine-readable integration.
+
+### `GET /.well-known/openapi.json`
+
+Same document at a well-known discovery path.
+
+## OpenTelemetry
+
+### `POST /v1/traces`
+
+Ingests OpenTelemetry OTLP traces.
+
+- `Content-Type: application/json`: parsed as OTLP `ExportTraceServiceRequest`.
+- Any other content type (for example `application/x-protobuf`): raw payload is stored as blob.
+
+Response:
+
+```json
+{
+  "batch_id": 1,
+  "accepted_spans": 3,
+  "stored": "json"
+}
+```
+
+### `POST /otlp/v1/traces`
+
+Same OTLP ingest behavior at a collector-compatible path.
+
+### OTLP Attribute Mapping
+
+If present in span or resource attributes, these keys are mapped to tracker entities:
+
+- `nulltracker.run_id`
+- `nulltracker.task_id`
+
 ## Health
 
 ### `GET /health`

@@ -51,6 +51,10 @@ bash tests/test_e2e.sh
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/openapi.json` | Full OpenAPI 3.1 schema for agent integration |
+| `GET` | `/.well-known/openapi.json` | Well-known OpenAPI discovery endpoint |
+| `POST` | `/v1/traces` | OTLP traces ingest (`application/json` or `application/x-protobuf`) |
+| `POST` | `/otlp/v1/traces` | OTLP collector-compatible traces ingest path |
 | `GET` | `/health` | Service and queue health |
 | `POST` | `/pipelines` | Create pipeline definition |
 | `GET` | `/pipelines` | List pipelines |
@@ -86,3 +90,24 @@ POST /runs/{run_id}/fail        (Bearer <lease_token>)
 - [API Reference](docs/api.md)
 - [Workflows](docs/workflows.md)
 - [Agent Lifecycle](docs/agent-lifecycle.md)
+
+Agent bootstrap endpoint:
+
+- `GET /openapi.json`
+
+## OpenTelemetry
+
+`nullTracker` accepts OTLP traces on:
+
+- `POST /v1/traces`
+- `POST /otlp/v1/traces`
+
+Behavior:
+
+- `application/json`: parses OTLP `ExportTraceServiceRequest` and stores normalized spans in `otlp_spans`.
+- Non-JSON payloads (for example `application/x-protobuf`): stores raw payload in `otlp_batches.payload_blob`.
+
+To link telemetry to tracker entities, include span/resource attributes:
+
+- `nulltracker.run_id`
+- `nulltracker.task_id`
