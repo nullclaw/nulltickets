@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+            zig_target: ""
+            ext: ""
+          - os: ubuntu-latest
+            target: linux-aarch64
+            zig_target: aarch64-linux-musl
+            ext: ""
+          - os: ubuntu-latest
+            target: linux-riscv64
+            zig_target: riscv64-linux-musl
+            ext: ""
+          - os: macos-latest
+            target: macos-aarch64
+            zig_target: ""
+            ext: ""
+          - os: macos-latest
+            target: macos-x86_64
+            zig_target: x86_64-macos
+            ext: ""
+          - os: windows-latest
+            target: windows-x86_64
+            zig_target: ""
+            ext: ".exe"
+          - os: windows-latest
+            target: windows-aarch64
+            zig_target: aarch64-windows
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build ReleaseSmall
+        run: zig build -Doptimize=ReleaseSmall ${{ matrix.zig_target && format('-Dtarget={0}', matrix.zig_target) || '' }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nulltracker-${{ matrix.target }}
+          path: zig-out/bin/nulltracker${{ matrix.ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Rename binaries
+        run: |
+          mv nulltracker-linux-x86_64/nulltracker nulltracker-linux-x86_64.bin
+          mv nulltracker-linux-aarch64/nulltracker nulltracker-linux-aarch64.bin
+          mv nulltracker-linux-riscv64/nulltracker nulltracker-linux-riscv64.bin
+          mv nulltracker-macos-aarch64/nulltracker nulltracker-macos-aarch64.bin
+          mv nulltracker-macos-x86_64/nulltracker nulltracker-macos-x86_64.bin
+          mv nulltracker-windows-x86_64/nulltracker.exe nulltracker-windows-x86_64.exe
+          mv nulltracker-windows-aarch64/nulltracker.exe nulltracker-windows-aarch64.exe
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            nulltracker-linux-x86_64.bin
+            nulltracker-linux-aarch64.bin
+            nulltracker-linux-riscv64.bin
+            nulltracker-macos-aarch64.bin
+            nulltracker-macos-x86_64.bin
+            nulltracker-windows-x86_64.exe
+            nulltracker-windows-aarch64.exe
+          generate_release_notes: true
