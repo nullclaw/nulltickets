@@ -12,11 +12,36 @@ stages, and attach artifacts.
 - Track long-running autonomous work with durable state.
 - Enforce lease-based execution and safe retries.
 
+## Design Principles
+
+`nullTickets` should be treated as the task tracker and source of truth for AI-agent execution.
+
+- `nullTickets` (this repository) is responsible for durable task state:
+  - pipelines, stages, transitions
+  - runs, leases, events, artifacts
+  - dependencies, quality gates, assignments
+  - idempotent writes and optimistic transition checks
+- `nullTickets` is intentionally orchestration-light:
+  - it does not decide global scheduling strategy
+  - it does not run agent processes itself
+- `nullboiler` is the orchestrator layer:
+  - repository: [nullboiler](https://github.com/nullclaw/nullboiler)
+  - plans execution, selects agents, balances queues, applies policies, and drives transitions
+- `nullclaw` is the agent runtime/executor layer:
+  - repository: [nullclaw](https://github.com/nullclaw/nullclaw)
+  - executes role prompts, produces outputs, reports back through tracker APIs
+
+Practical architecture:
+
+1. `nullTickets` stores the work graph and execution history.
+2. `nullboiler` orchestrates who should do what and when.
+3. `nullclaw` agents do the actual work and publish evidence/results.
+
 ## Adoption Path
 
 1. Use `nullclaw` only for one-off tasks.
 2. Add `nullTickets` when you need a durable backlog (for example 100 tasks) and sequential execution with one agent loop.
-3. Add an external orchestrator only when you need multi-agent scheduling, balancing, and policy automation.
+3. Add `nullboiler` when you need multi-agent scheduling, balancing, and policy automation.
 
 ## Tech Stack
 
