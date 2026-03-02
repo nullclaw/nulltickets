@@ -37,6 +37,12 @@ Practical architecture:
 2. `nullboiler` orchestrates who should do what and when.
 3. `nullclaw` agents do the actual work and publish evidence/results.
 
+You do not have to use all three components.
+
+- `nullclaw` + `nullTickets` is a valid setup for sequential execution.
+- `nullTickets` can be used with other agent runtimes as long as they implement the tracker contract (`claim -> events/gates -> transition/fail`).
+- `nullboiler` is optional and is mainly needed for advanced multi-agent orchestration.
+
 ## Adoption Path
 
 1. Use `nullclaw` only for one-off tasks.
