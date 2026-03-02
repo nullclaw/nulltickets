@@ -13,19 +13,41 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.next(); // skip program name
 
+    // Check for manifest protocol flags before normal arg parsing
+    if (args.next()) |first_arg| {
+        if (std.mem.eql(u8, first_arg, "--export-manifest")) {
+            try @import("export_manifest.zig").run();
+            return;
+        }
+        if (std.mem.eql(u8, first_arg, "--from-json")) {
+            if (args.next()) |json_str| {
+                try @import("from_json.zig").run(allocator, json_str);
+            } else {
+                std.debug.print("error: --from-json requires a JSON argument\n", .{});
+                std.process.exit(1);
+            }
+            return;
+        }
+    }
+
+    // Re-parse all args for normal operation
+    var args2 = try std.process.argsWithAllocator(allocator);
+    defer args2.deinit();
+    _ = args2.next(); // skip program name
+
     var port: u16 = 7700;
     var db_path: [:0]const u8 = "nulltickets.db";
 
-    while (args.next()) |arg| {
+    while (args2.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
-            if (args.next()) |val| {
+            if (args2.next()) |val| {
                 port = std.fmt.parseInt(u16, val, 10) catch {
                     std.debug.print("invalid port: {s}\n", .{val});
                     return;
                 };
             }
         } else if (std.mem.eql(u8, arg, "--db")) {
-            if (args.next()) |val| {
+            if (args2.next()) |val| {
                 db_path = val;
             }
         } else if (std.mem.eql(u8, arg, "--version")) {
