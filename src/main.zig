@@ -1,6 +1,7 @@
 const std = @import("std");
 const Store = @import("store.zig").Store;
 const api = @import("api.zig");
+const config = @import("config.zig");
 
 const version = "0.1.0";
 
@@ -35,26 +36,48 @@ pub fn main() !void {
     defer args2.deinit();
     _ = args2.next(); // skip program name
 
-    var port: u16 = 7700;
-    var db_path: [:0]const u8 = "nulltickets.db";
+    var port_override: ?u16 = null;
+    var db_override: ?[:0]const u8 = null;
+    var config_path: []const u8 = "config.json";
 
     while (args2.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
             if (args2.next()) |val| {
-                port = std.fmt.parseInt(u16, val, 10) catch {
+                port_override = std.fmt.parseInt(u16, val, 10) catch {
                     std.debug.print("invalid port: {s}\n", .{val});
                     return;
                 };
             }
         } else if (std.mem.eql(u8, arg, "--db")) {
             if (args2.next()) |val| {
-                db_path = val;
+                db_override = val;
+            }
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            if (args2.next()) |val| {
+                config_path = val;
             }
         } else if (std.mem.eql(u8, arg, "--version")) {
             std.debug.print("nulltickets v{s}\n", .{version});
             return;
         }
     }
+
+    var cfg_arena = std.heap.ArenaAllocator.init(allocator);
+    defer cfg_arena.deinit();
+    const cfg = config.loadFromFile(cfg_arena.allocator(), config_path) catch |err| {
+        std.debug.print("failed to load config from {s}: {}\n", .{ config_path, err });
+        return;
+    };
+
+    const port = port_override orelse cfg.port;
+    const db_path: [:0]const u8 = db_override orelse blk: {
+        const db_z = cfg_arena.allocator().allocSentinel(u8, cfg.db.len, 0) catch {
+            std.debug.print("out of memory\n", .{});
+            return;
+        };
+        @memcpy(db_z, cfg.db);
+        break :blk db_z;
+    };
 
     std.debug.print("nulltickets v{s}\n", .{version});
     std.debug.print("opening database: {s}\n", .{db_path});

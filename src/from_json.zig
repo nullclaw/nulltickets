@@ -12,14 +12,16 @@ pub fn run(allocator: std.mem.Allocator, json_str: []const u8) !void {
     };
     defer parsed.deinit();
 
-    var buf: std.ArrayList(u8) = .{};
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try std.fmt.format(w, "{{\n  \"port\": {d},\n  \"db\": \"{s}\"\n}}\n", .{ parsed.value.port, parsed.value.db_path });
+    const config_json = try std.json.Stringify.valueAlloc(allocator, .{
+        .port = parsed.value.port,
+        .db = parsed.value.db_path,
+    }, .{ .whitespace = .indent_2 });
+    defer allocator.free(config_json);
 
     const file = try std.fs.cwd().createFile("config.json", .{});
     defer file.close();
-    try file.writeAll(buf.items);
+    try file.writeAll(config_json);
+    try file.writeAll("\n");
 
     const stdout = std.fs.File.stdout();
     try stdout.writeAll("{\"status\":\"ok\"}\n");
