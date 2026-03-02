@@ -1,11 +1,11 @@
-# AGENTS.md - nullTracker Engineering Protocol
+# AGENTS.md - nullTicket Engineering Protocol
 
 This file defines the default working protocol for coding agents in this repository.
 Scope: entire repository.
 
 ## 1) Project Snapshot (Read First)
 
-nullTracker is a headless task tracker for autonomous AI agents:
+nullTicket is a headless task tracker for autonomous AI agents:
 
 - one Zig binary
 - one SQLite database file

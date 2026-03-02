@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# E2E test for nulltracker
+# E2E test for nullticket
 # Tests full pipeline flow: create pipeline → create tasks → claim → events → transition → fail
 
 PORT=${PORT:-7799}
-DB="/tmp/nulltracker_e2e_$$.db"
-BIN="./zig-out/bin/nulltracker"
+DB="/tmp/nullticket_e2e_$$.db"
+BIN="./zig-out/bin/nullticket"
 PASS=0
 FAIL=0
 
@@ -49,7 +49,7 @@ assert_json() {
 }
 
 # Build
-echo "Building nulltracker..."
+echo "Building nullticket..."
 zig build 2>&1
 
 # Start server
@@ -96,7 +96,7 @@ OTLP_JSON='{
     {
       "resource": {
         "attributes": [
-          { "key": "service.name", "value": { "stringValue": "nulltracker-e2e" } }
+          { "key": "service.name", "value": { "stringValue": "nullticket-e2e" } }
         ]
       },
       "scopeSpans": [
@@ -111,8 +111,8 @@ OTLP_JSON='{
               "startTimeUnixNano": "1735689600000000000",
               "endTimeUnixNano": "1735689601000000000",
               "attributes": [
-                { "key": "nulltracker.run_id", "value": { "stringValue": "run-e2e" } },
-                { "key": "nulltracker.task_id", "value": { "stringValue": "task-e2e" } }
+                { "key": "nullticket.run_id", "value": { "stringValue": "run-e2e" } },
+                { "key": "nullticket.task_id", "value": { "stringValue": "task-e2e" } }
               ],
               "status": { "code": 1, "message": "ok" }
             }

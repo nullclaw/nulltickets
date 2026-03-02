@@ -1,6 +1,6 @@
-# nullTracker Docs
+# nullTicket Docs
 
-This directory contains product and engineering documentation for `nullTracker`.
+This directory contains product and engineering documentation for `nullTicket`.
 
 ## Contents
 

@@ -2,7 +2,7 @@
 
 ## Model
 
-`nullTracker` uses pipeline definitions to model workflow stages and transitions.
+`nullTicket` uses pipeline definitions to model workflow stages and transitions.
 Each task belongs to one pipeline and has exactly one active stage at a time.
 
 ## Pipeline Definition

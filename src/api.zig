@@ -197,8 +197,8 @@ fn handleOtlpTraces(ctx: *Context, body: []const u8, raw_request: []const u8) Ht
     for (resource_spans) |resource_span| {
         const resource_attributes: []const OtlpKeyValue = if (resource_span.resource) |resource| (resource.attributes orelse &.{}) else &.{};
         const resource_attributes_json = otlpAttributesJson(ctx.allocator, resource_attributes) catch return serverError(ctx.allocator);
-        const resource_run_id = getOtlpAttributeText(ctx.allocator, resource_attributes, "nulltracker.run_id") catch return serverError(ctx.allocator);
-        const resource_task_id = getOtlpAttributeText(ctx.allocator, resource_attributes, "nulltracker.task_id") catch return serverError(ctx.allocator);
+        const resource_run_id = getOtlpAttributeText(ctx.allocator, resource_attributes, "nullticket.run_id") catch return serverError(ctx.allocator);
+        const resource_task_id = getOtlpAttributeText(ctx.allocator, resource_attributes, "nullticket.task_id") catch return serverError(ctx.allocator);
 
         if (resource_span.scopeSpans) |scope_spans| {
             ingestOtlpScopeSpans(
@@ -260,8 +260,8 @@ fn ingestOtlpScopeSpans(
             const kind = if (span.kind) |value| try jsonValueToText(ctx.allocator, value) else null;
             const status_code = if (span.status) |status| if (status.code) |code| try jsonValueToText(ctx.allocator, code) else null else null;
             const status_message = if (span.status) |status| status.message else null;
-            const run_id = (try getOtlpAttributeText(ctx.allocator, attributes, "nulltracker.run_id")) orelse resource_run_id;
-            const task_id = (try getOtlpAttributeText(ctx.allocator, attributes, "nulltracker.task_id")) orelse resource_task_id;
+            const run_id = (try getOtlpAttributeText(ctx.allocator, attributes, "nullticket.run_id")) orelse resource_run_id;
+            const task_id = (try getOtlpAttributeText(ctx.allocator, attributes, "nullticket.task_id")) orelse resource_task_id;
 
             try ctx.store.addOtlpSpan(batch_id, .{
                 .trace_id = trace_id,

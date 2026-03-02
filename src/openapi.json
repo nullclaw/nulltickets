@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "nullTracker API",
+    "title": "nullTicket API",
     "version": "0.1.0",
     "description": "Headless task tracker API for autonomous AI agents. Use this schema for agent-side integration and tool generation."
   },

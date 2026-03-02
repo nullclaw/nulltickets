@@ -2,7 +2,7 @@
 
 ## Overview
 
-`nullTracker` is a headless control plane for autonomous agent execution.
+`nullTicket` is a headless control plane for autonomous agent execution.
 
 - Single-process Zig service
 - SQLite persistence

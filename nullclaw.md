@@ -1,6 +1,6 @@
-# nullTracker + NullClaw Executors
+# nullTicket + NullClaw Executors
 
-This guide explains how to run `nullclaw` agents as role-based executors for `nullTracker`.
+This guide explains how to run `nullclaw` agents as role-based executors for `nullTicket`.
 
 ## 1. Prepare nullclaw
 
@@ -18,10 +18,10 @@ Useful runtime flags per role:
 
 ## 2. Create pipelines with explicit `agent_role` (copy-paste)
 
-Start `nullTracker` first:
+Start `nullTicket` first:
 
 ```bash
-cd /Users/igorsomov/Code/nullTracker
+cd /Users/igorsomov/Code/nullTicket
 zig build run -- --port 7700 --db runtime/tracker.db
 ```
 
@@ -193,7 +193,7 @@ zig-out/bin/nullclaw cron list
 
 ### 3.2 Tracker executor contract
 
-For full `nullTracker` workflow execution, each role executor must still perform this API contract:
+For full `nullTicket` workflow execution, each role executor must still perform this API contract:
 
 1. `POST /leases/claim` with its `agent_id` and `agent_role`.
 2. If `204`, sleep and retry.
@@ -244,7 +244,7 @@ cd /Users/igorsomov/Code/nullclaw
 zig-out/bin/nullclaw agent -m "Give me MVP Scope for Team Expense Tracker (API + SQLite + web UI) with feature breakdown and acceptance criteria" > /tmp/mvp_scope.md
 ```
 
-Then planner (`llm-planner`) converts `/tmp/mvp_scope.md` into separate tasks in `nullTracker` (one task per feature, plus one release task).
+Then planner (`llm-planner`) converts `/tmp/mvp_scope.md` into separate tasks in `nullTicket` (one task per feature, plus one release task).
 This lets you go from idea to executable backlog in a few minutes.
 
 ### Pipeline A: Feature Task Flow
@@ -302,7 +302,7 @@ Release QA gate:
 ### Parallel Development
 
 Run multiple workers with the same role `llm-dev` but different `agent_id`.
-`nullTracker` lease claims guarantee exclusive ownership of each claimed run.
+`nullTicket` lease claims guarantee exclusive ownership of each claimed run.
 
 Example:
 
@@ -331,7 +331,7 @@ Each feature task should include explicit acceptance criteria in `metadata`.
 
 ## 5. Tracker Executor Bridge (bash, current practical adapter)
 
-Use this when you want a complete end-to-end executor loop for `nullTracker` today.
+Use this when you want a complete end-to-end executor loop for `nullTicket` today.
 It bridges role claims/transitions and artifact writes through HTTP APIs.
 
 ```bash

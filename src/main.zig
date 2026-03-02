@@ -14,7 +14,7 @@ pub fn main() !void {
     _ = args.next(); // skip program name
 
     var port: u16 = 7700;
-    var db_path: [:0]const u8 = "nulltracker.db";
+    var db_path: [:0]const u8 = "nullticket.db";
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
@@ -29,12 +29,12 @@ pub fn main() !void {
                 db_path = val;
             }
         } else if (std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("nulltracker v{s}\n", .{version});
+            std.debug.print("nullticket v{s}\n", .{version});
             return;
         }
     }
 
-    std.debug.print("nulltracker v{s}\n", .{version});
+    std.debug.print("nullticket v{s}\n", .{version});
     std.debug.print("opening database: {s}\n", .{db_path});
 
     var store = try Store.init(allocator, db_path);

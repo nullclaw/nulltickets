@@ -1,7 +1,7 @@
 .{
-    .name = .nulltracker,
+    .name = .nullticket,
     .version = "0.1.0",
-    .fingerprint = 0x7559709b8e933727,
+    .fingerprint = 0x7ba0454ad3d145e9,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .sqlite3 = .{

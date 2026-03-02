@@ -43,8 +43,8 @@ Same OTLP ingest behavior at a collector-compatible path.
 
 If present in span or resource attributes, these keys are mapped to tracker entities:
 
-- `nulltracker.run_id`
-- `nulltracker.task_id`
+- `nullticket.run_id`
+- `nullticket.task_id`
 
 ## Health
 

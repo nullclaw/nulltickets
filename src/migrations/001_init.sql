@@ -1,4 +1,4 @@
--- nulltracker schema v1
+-- nullticket schema v1
 
 CREATE TABLE IF NOT EXISTS pipelines (
     id TEXT PRIMARY KEY,

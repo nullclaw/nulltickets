@@ -1,8 +1,8 @@
-# nullTracker
+# nullTicket
 
 Headless task tracker for autonomous AI agents.
 
-`nullTracker` is a single Zig binary backed by SQLite. It exposes a REST API for
+`nullTicket` is a single Zig binary backed by SQLite. It exposes a REST API for
 pipeline-driven task orchestration: claim work by role, report progress, transition
 stages, and attach artifacts.
 
@@ -28,7 +28,7 @@ zig build run -- --port 7700 --db tracker.db
 Default values:
 
 - `--port`: `7700`
-- `--db`: `nulltracker.db`
+- `--db`: `nullticket.db`
 
 ## Test
 
@@ -99,7 +99,7 @@ Agent bootstrap endpoint:
 
 ## OpenTelemetry
 
-`nullTracker` accepts OTLP traces on:
+`nullTicket` accepts OTLP traces on:
 
 - `POST /v1/traces`
 - `POST /otlp/v1/traces`
@@ -111,5 +111,5 @@ Behavior:
 
 To link telemetry to tracker entities, include span/resource attributes:
 
-- `nulltracker.run_id`
-- `nulltracker.task_id`
+- `nullticket.run_id`
+- `nullticket.task_id`
