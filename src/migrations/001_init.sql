@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     description TEXT NOT NULL,
     priority INTEGER NOT NULL DEFAULT 0,
     metadata_json TEXT NOT NULL DEFAULT '{}',
+    task_version INTEGER NOT NULL DEFAULT 1,
+    next_eligible_at_ms INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER,
+    retry_delay_ms INTEGER NOT NULL DEFAULT 0,
+    dead_letter_stage TEXT,
+    dead_letter_reason TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL
 );
@@ -71,6 +77,52 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at_ms, id);
+
+CREATE TABLE IF NOT EXISTS task_dependencies (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    depends_on_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (task_id, depends_on_task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_dependencies_depends_on ON task_dependencies(depends_on_task_id);
+
+CREATE TABLE IF NOT EXISTS gate_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    gate TEXT NOT NULL,
+    status TEXT NOT NULL,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    actor TEXT,
+    ts_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gate_results_run ON gate_results(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_gate_results_gate ON gate_results(run_id, gate, id DESC);
+
+CREATE TABLE IF NOT EXISTS task_assignments (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL,
+    assigned_by TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (task_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_assignments_active_task ON task_assignments(task_id, active);
+CREATE INDEX IF NOT EXISTS idx_task_assignments_agent_active ON task_assignments(agent_id, active);
+
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    key TEXT NOT NULL,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    request_hash BLOB NOT NULL,
+    response_status INTEGER NOT NULL,
+    response_body TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (key, method, path)
+);
+CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at_ms DESC);
 
 CREATE TABLE IF NOT EXISTS otlp_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

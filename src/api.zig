@@ -2,6 +2,7 @@ const std = @import("std");
 const store_mod = @import("store.zig");
 const Store = store_mod.Store;
 const domain = @import("domain.zig");
+const ids = @import("ids.zig");
 const log = std.log.scoped(.api);
 
 const version = "0.1.0";
@@ -50,6 +51,29 @@ const OtlpTraceExportRequest = struct {
     resourceSpans: ?[]const OtlpResourceSpan = null,
 };
 
+const RetryPolicyRequest = struct {
+    max_attempts: ?i64 = null,
+    retry_delay_ms: ?i64 = null,
+    dead_letter_stage: ?[]const u8 = null,
+};
+
+const TaskCreatePayload = struct {
+    pipeline_id: []const u8,
+    title: []const u8,
+    description: []const u8,
+    priority: ?i64 = null,
+    metadata: ?std.json.Value = null,
+    retry_policy: ?RetryPolicyRequest = null,
+    dependencies: ?[]const []const u8 = null,
+    assigned_agent_id: ?[]const u8 = null,
+    assigned_by: ?[]const u8 = null,
+};
+
+const IdempotencyContext = struct {
+    key: []const u8,
+    request_hash: [32]u8,
+};
+
 pub const Context = struct {
     store: *Store,
     allocator: std.mem.Allocator,
@@ -73,66 +97,223 @@ pub fn handleRequest(
     const seg1 = getPathSegment(path.path, 1);
     const seg2 = getPathSegment(path.path, 2);
     const seg3 = getPathSegment(path.path, 3);
+    const seg4 = getPathSegment(path.path, 4);
 
     const is_get = std.mem.eql(u8, method, "GET");
     const is_post = std.mem.eql(u8, method, "POST");
+    const is_delete = std.mem.eql(u8, method, "DELETE");
+
+    const is_write = is_post or is_delete;
+
+    var idempotency: ?IdempotencyContext = null;
+
+    if (is_write) {
+        if (extractHeader(raw_request, "Idempotency-Key")) |idem_key| {
+            const request_hash = ids.hashBytes(body);
+            const existing = ctx.store.getIdempotency(idem_key, method, path.path) catch return serverError(ctx.allocator);
+            if (existing) |row| {
+                defer ctx.store.freeIdempotencyRow(row);
+                if (!std.mem.eql(u8, row.request_hash[0..], request_hash[0..])) {
+                    return respondError(ctx.allocator, 409, "idempotency_conflict", "Idempotency-Key was reused with a different request body");
+                }
+                const replay_body = ctx.allocator.dupe(u8, row.response_body) catch return serverError(ctx.allocator);
+                return .{
+                    .status = statusTextFromCode(@intCast(row.response_status)),
+                    .body = replay_body,
+                    .status_code = @intCast(row.response_status),
+                };
+            }
+            idempotency = .{
+                .key = idem_key,
+                .request_hash = request_hash,
+            };
+        }
+    }
+
+    var response: HttpResponse = respondError(ctx.allocator, 404, "not_found", "Not found");
 
     // GET /health
     if (is_get and eql(seg0, "health") and seg1 == null) {
-        return handleHealth(ctx);
+        response = handleHealth(ctx);
+        return response;
     }
 
     // OpenAPI discovery
     if (is_get and eql(seg0, "openapi.json") and seg1 == null) {
-        return handleOpenApi();
+        response = handleOpenApi();
+        return response;
     }
     if (is_get and eql(seg0, ".well-known") and eql(seg1, "openapi.json") and seg2 == null) {
-        return handleOpenApi();
+        response = handleOpenApi();
+        return response;
     }
 
     // OpenTelemetry OTLP traces ingest
     if (is_post and eql(seg0, "v1") and eql(seg1, "traces") and seg2 == null) {
-        return handleOtlpTraces(ctx, body, raw_request);
+        response = handleOtlpTraces(ctx, body, raw_request);
+        return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
     }
     if (is_post and eql(seg0, "otlp") and eql(seg1, "v1") and eql(seg2, "traces") and seg3 == null) {
-        return handleOtlpTraces(ctx, body, raw_request);
+        response = handleOtlpTraces(ctx, body, raw_request);
+        return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
     }
 
     // Pipelines
     if (eql(seg0, "pipelines")) {
-        if (is_post and seg1 == null) return handleCreatePipeline(ctx, body);
-        if (is_get and seg1 == null) return handleListPipelines(ctx);
-        if (is_get and seg1 != null and seg2 == null) return handleGetPipeline(ctx, seg1.?);
+        if (is_post and seg1 == null) {
+            response = handleCreatePipeline(ctx, body);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_get and seg1 == null) {
+            response = handleListPipelines(ctx);
+            return response;
+        }
+        if (is_get and seg1 != null and seg2 == null) {
+            response = handleGetPipeline(ctx, seg1.?);
+            return response;
+        }
     }
 
     // Tasks
     if (eql(seg0, "tasks")) {
-        if (is_post and seg1 == null) return handleCreateTask(ctx, body);
-        if (is_get and seg1 == null) return handleListTasks(ctx, path.query);
-        if (is_get and seg1 != null and seg2 == null) return handleGetTask(ctx, seg1.?);
+        if (is_post and seg1 == null) {
+            response = handleCreateTask(ctx, body);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_post and eql(seg1, "bulk") and seg2 == null) {
+            response = handleBulkCreateTasks(ctx, body);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_get and seg1 == null) {
+            response = handleListTasks(ctx, path.query);
+            return response;
+        }
+        if (is_get and seg1 != null and seg2 == null) {
+            response = handleGetTask(ctx, seg1.?);
+            return response;
+        }
+
+        if (seg1 != null and eql(seg2, "dependencies")) {
+            if (is_post and seg3 == null) {
+                response = handleAddTaskDependency(ctx, seg1.?, body);
+                return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+            }
+            if (is_get and seg3 == null) {
+                response = handleListTaskDependencies(ctx, seg1.?);
+                return response;
+            }
+        }
+
+        if (seg1 != null and eql(seg2, "assignments")) {
+            if (is_post and seg3 == null) {
+                response = handleAssignTask(ctx, seg1.?, body);
+                return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+            }
+            if (is_get and seg3 == null) {
+                response = handleListTaskAssignments(ctx, seg1.?);
+                return response;
+            }
+            if (is_delete and seg3 != null and seg4 == null) {
+                response = handleUnassignTask(ctx, seg1.?, seg3.?);
+                return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+            }
+        }
     }
 
     // Leases
     if (eql(seg0, "leases")) {
-        if (is_post and eql(seg1, "claim") and seg2 == null) return handleClaim(ctx, body);
-        if (is_post and seg1 != null and eql(seg2, "heartbeat")) return handleHeartbeat(ctx, seg1.?, raw_request);
+        if (is_post and eql(seg1, "claim") and seg2 == null) {
+            response = handleClaim(ctx, body);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_post and seg1 != null and eql(seg2, "heartbeat")) {
+            response = handleHeartbeat(ctx, seg1.?, raw_request);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
     }
 
     // Runs
     if (eql(seg0, "runs") and seg1 != null) {
-        if (is_post and eql(seg2, "events")) return handleAddEvent(ctx, seg1.?, body, raw_request);
-        if (is_get and eql(seg2, "events")) return handleListEvents(ctx, seg1.?);
-        if (is_post and eql(seg2, "transition")) return handleTransition(ctx, seg1.?, body, raw_request);
-        if (is_post and eql(seg2, "fail")) return handleFail(ctx, seg1.?, body, raw_request);
+        if (is_post and eql(seg2, "events")) {
+            response = handleAddEvent(ctx, seg1.?, body, raw_request);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_get and eql(seg2, "events")) {
+            response = handleListEvents(ctx, seg1.?, path.query);
+            return response;
+        }
+        if (is_post and eql(seg2, "gates")) {
+            response = handleAddGateResult(ctx, seg1.?, body, raw_request);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_get and eql(seg2, "gates")) {
+            response = handleListGateResults(ctx, seg1.?);
+            return response;
+        }
+        if (is_post and eql(seg2, "transition")) {
+            response = handleTransition(ctx, seg1.?, body, raw_request);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_post and eql(seg2, "fail")) {
+            response = handleFail(ctx, seg1.?, body, raw_request);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
     }
 
     // Artifacts
     if (eql(seg0, "artifacts")) {
-        if (is_post and seg1 == null) return handleAddArtifact(ctx, body);
-        if (is_get and seg1 == null) return handleListArtifacts(ctx, path.query);
+        if (is_post and seg1 == null) {
+            response = handleAddArtifact(ctx, body);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_get and seg1 == null) {
+            response = handleListArtifacts(ctx, path.query);
+            return response;
+        }
     }
 
-    return respondError(ctx.allocator, 404, "not_found", "Not found");
+    if (is_get and eql(seg0, "ops") and eql(seg1, "queue") and seg2 == null) {
+        response = handleQueueOps(ctx, path.query);
+        return response;
+    }
+
+    return response;
+}
+
+fn finalizeWithIdempotency(
+    ctx: *Context,
+    method: []const u8,
+    path: []const u8,
+    idempotency: ?IdempotencyContext,
+    response: HttpResponse,
+) HttpResponse {
+    if (idempotency) |idem| {
+        if (response.status_code < 500) {
+            ctx.store.putIdempotency(
+                idem.key,
+                method,
+                path,
+                idem.request_hash,
+                response.status_code,
+                response.body,
+            ) catch return serverError(ctx.allocator);
+        }
+    }
+    return response;
+}
+
+fn statusTextFromCode(status_code: u16) []const u8 {
+    return switch (status_code) {
+        200 => "200 OK",
+        201 => "201 Created",
+        204 => "204 No Content",
+        400 => "400 Bad Request",
+        401 => "401 Unauthorized",
+        404 => "404 Not Found",
+        409 => "409 Conflict",
+        410 => "410 Gone",
+        else => "500 Internal Server Error",
+    };
 }
 
 // ===== Handlers =====
@@ -395,50 +576,155 @@ fn handleGetPipeline(ctx: *Context, id: []const u8) HttpResponse {
 }
 
 fn handleCreateTask(ctx: *Context, body: []const u8) HttpResponse {
-    var parsed = std.json.parseFromSlice(struct {
-        pipeline_id: []const u8,
-        title: []const u8,
-        description: []const u8,
-        priority: ?i64 = null,
-        metadata: ?std.json.Value = null,
-    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
+    var parsed = std.json.parseFromSlice(TaskCreatePayload, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
         return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
     };
     defer parsed.deinit();
     const req = parsed.value;
 
-    const meta = if (req.metadata) |m| (jsonStringify(ctx.allocator, m) catch "{}") else "{}";
+    ctx.store.execSimple("BEGIN IMMEDIATE;") catch return serverError(ctx.allocator);
+    var should_rollback = true;
+    defer if (should_rollback) ctx.store.execSimple("ROLLBACK;") catch {};
 
-    const id = ctx.store.createTask(req.pipeline_id, req.title, req.description, req.priority orelse 0, meta) catch |err| {
+    const id = createTaskWithRelations(ctx, req) catch |err| {
         return switch (err) {
             error.PipelineNotFound => respondError(ctx.allocator, 404, "pipeline_not_found", "Pipeline not found"),
+            error.TaskNotFound => respondError(ctx.allocator, 404, "task_not_found", "Dependency task not found"),
+            error.DependencyTaskNotFound => respondError(ctx.allocator, 404, "task_not_found", "Dependency task not found"),
+            error.DuplicateDependency => respondError(ctx.allocator, 409, "duplicate_dependency", "Dependency already exists"),
+            error.InvalidDependency => respondError(ctx.allocator, 400, "invalid_dependency", "Task cannot depend on itself"),
             else => serverError(ctx.allocator),
         };
     };
     defer ctx.store.freeOwnedString(id);
+
+    ctx.store.execSimple("COMMIT;") catch return serverError(ctx.allocator);
+    should_rollback = false;
 
     const id_json = quoteJson(ctx.allocator, id) catch return serverError(ctx.allocator);
     const resp = std.fmt.allocPrint(ctx.allocator, "{{\"id\":{s}}}", .{id_json}) catch return serverError(ctx.allocator);
     return .{ .status = "201 Created", .body = resp, .status_code = 201 };
 }
 
+fn createTaskWithRelations(ctx: *Context, req: TaskCreatePayload) ![]const u8 {
+    const meta = if (req.metadata) |m| (jsonStringify(ctx.allocator, m) catch "{}") else "{}";
+    const retry_policy = req.retry_policy orelse RetryPolicyRequest{};
+
+    const id = try ctx.store.createTask(
+        req.pipeline_id,
+        req.title,
+        req.description,
+        req.priority orelse 0,
+        meta,
+        retry_policy.max_attempts,
+        retry_policy.retry_delay_ms orelse 0,
+        retry_policy.dead_letter_stage,
+    );
+    errdefer ctx.store.freeOwnedString(id);
+
+    if (req.dependencies) |deps| {
+        for (deps) |dep_task_id| {
+            try ctx.store.addTaskDependency(id, dep_task_id);
+        }
+    }
+
+    if (req.assigned_agent_id) |assigned_agent| {
+        try ctx.store.assignTask(id, assigned_agent, req.assigned_by);
+    }
+
+    return id;
+}
+
+fn handleBulkCreateTasks(ctx: *Context, body: []const u8) HttpResponse {
+    var parsed = std.json.parseFromSlice(struct {
+        tasks: []const TaskCreatePayload,
+    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
+    };
+    defer parsed.deinit();
+
+    if (parsed.value.tasks.len == 0) {
+        return respondError(ctx.allocator, 400, "invalid_request", "tasks list must not be empty");
+    }
+
+    ctx.store.execSimple("BEGIN IMMEDIATE;") catch return serverError(ctx.allocator);
+    var should_rollback = true;
+    defer if (should_rollback) ctx.store.execSimple("ROLLBACK;") catch {};
+
+    var created_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (created_ids.items) |id| ctx.store.freeOwnedString(id);
+        created_ids.deinit(ctx.allocator);
+    }
+
+    for (parsed.value.tasks) |task_req| {
+        const id = createTaskWithRelations(ctx, task_req) catch |err| {
+            return switch (err) {
+                error.PipelineNotFound => respondError(ctx.allocator, 404, "pipeline_not_found", "Pipeline not found"),
+                error.TaskNotFound => respondError(ctx.allocator, 404, "task_not_found", "Dependency task not found"),
+                error.DependencyTaskNotFound => respondError(ctx.allocator, 404, "task_not_found", "Dependency task not found"),
+                error.DuplicateDependency => respondError(ctx.allocator, 409, "duplicate_dependency", "Dependency already exists"),
+                error.InvalidDependency => respondError(ctx.allocator, 400, "invalid_dependency", "Task cannot depend on itself"),
+                else => serverError(ctx.allocator),
+            };
+        };
+        created_ids.append(ctx.allocator, id) catch return serverError(ctx.allocator);
+    }
+
+    ctx.store.execSimple("COMMIT;") catch return serverError(ctx.allocator);
+    should_rollback = false;
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(ctx.allocator);
+    w.writeAll("{\"ids\":[") catch return serverError(ctx.allocator);
+    for (created_ids.items, 0..) |id, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        const id_json = quoteJson(ctx.allocator, id) catch return serverError(ctx.allocator);
+        w.writeAll(id_json) catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]}") catch return serverError(ctx.allocator);
+
+    return .{ .status = "201 Created", .body = buf.items, .status_code = 201 };
+}
+
 fn handleListTasks(ctx: *Context, query: ?[]const u8) HttpResponse {
     const stage = parseQueryParam(query, "stage");
     const pipeline_id = parseQueryParam(query, "pipeline_id");
     const limit_str = parseQueryParam(query, "limit");
-    const limit: ?i64 = if (limit_str) |ls| (std.fmt.parseInt(i64, ls, 10) catch null) else null;
+    const cursor = parseQueryParam(query, "cursor");
+    const limit = if (limit_str) |ls| (std.fmt.parseInt(i64, ls, 10) catch 50) else 50;
+    if (limit <= 0 or limit > 1000) {
+        return respondError(ctx.allocator, 400, "invalid_limit", "limit must be between 1 and 1000");
+    }
 
-    const tasks = ctx.store.listTasks(stage, pipeline_id, limit) catch return serverError(ctx.allocator);
-    defer ctx.store.freeTaskRows(tasks);
+    var cursor_created_at_ms: ?i64 = null;
+    var cursor_id: ?[]const u8 = null;
+    if (cursor) |value| {
+        const parsed = parseCompositeCursor(value) orelse {
+            return respondError(ctx.allocator, 400, "invalid_cursor", "Invalid cursor format");
+        };
+        cursor_created_at_ms = parsed.ts_ms;
+        cursor_id = parsed.id;
+    }
+
+    const page = ctx.store.listTasksPage(stage, pipeline_id, cursor_created_at_ms, cursor_id, limit) catch return serverError(ctx.allocator);
+    defer ctx.store.freeTaskPage(page);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var w = buf.writer(ctx.allocator);
-    w.writeAll("[") catch return serverError(ctx.allocator);
-    for (tasks, 0..) |t, i| {
+    w.writeAll("{\"items\":[") catch return serverError(ctx.allocator);
+    for (page.items, 0..) |t, i| {
         if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
         writeTaskJson(&w, ctx.allocator, t) catch return serverError(ctx.allocator);
     }
-    w.writeAll("]") catch return serverError(ctx.allocator);
+    w.writeAll("],\"next_cursor\":") catch return serverError(ctx.allocator);
+    if (page.next_cursor) |next_cursor| {
+        const next_cursor_json = quoteJson(ctx.allocator, next_cursor) catch return serverError(ctx.allocator);
+        w.writeAll(next_cursor_json) catch return serverError(ctx.allocator);
+    } else {
+        w.writeAll("null") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("}") catch return serverError(ctx.allocator);
 
     return .{ .status = "200 OK", .body = buf.items };
 }
@@ -454,6 +740,10 @@ fn handleGetTask(ctx: *Context, id: []const u8) HttpResponse {
     defer if (pipeline) |p| ctx.store.freePipelineRow(p);
     const latest_run = ctx.store.getLatestRun(id) catch null;
     defer if (latest_run) |r| ctx.store.freeRunRow(r);
+    const dependencies = ctx.store.listTaskDependencies(id) catch return serverError(ctx.allocator);
+    defer ctx.store.freeDependencyRows(dependencies);
+    const assignments = ctx.store.listTaskAssignments(id) catch return serverError(ctx.allocator);
+    defer ctx.store.freeAssignmentRows(assignments);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var w = buf.writer(ctx.allocator);
@@ -466,6 +756,32 @@ fn handleGetTask(ctx: *Context, id: []const u8) HttpResponse {
         writeRunFields(&w, ctx.allocator, run) catch return serverError(ctx.allocator);
         w.writeAll("}") catch return serverError(ctx.allocator);
     }
+
+    w.writeAll(",\"dependencies\":[") catch return serverError(ctx.allocator);
+    for (dependencies, 0..) |dep, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "depends_on_task_id", dep.depends_on_task_id) catch return serverError(ctx.allocator);
+        w.print(",\"resolved\":{s}", .{if (dep.resolved) "true" else "false"}) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]") catch return serverError(ctx.allocator);
+
+    w.writeAll(",\"assignments\":[") catch return serverError(ctx.allocator);
+    for (assignments, 0..) |a, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "agent_id", a.agent_id) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeNullableStringField(&w, ctx.allocator, "assigned_by", a.assigned_by) catch return serverError(ctx.allocator);
+        w.print(",\"active\":{s},\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{
+            if (a.active) "true" else "false",
+            a.created_at_ms,
+            a.updated_at_ms,
+        }) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]") catch return serverError(ctx.allocator);
 
     // Available transitions
     if (pipeline) |pip| {
@@ -484,6 +800,18 @@ fn handleGetTask(ctx: *Context, id: []const u8) HttpResponse {
             writeStringField(&w, ctx.allocator, "trigger", t.trigger) catch return serverError(ctx.allocator);
             w.writeAll(",") catch return serverError(ctx.allocator);
             writeStringField(&w, ctx.allocator, "to", t.to) catch return serverError(ctx.allocator);
+            w.writeAll(",\"required_gates\":") catch return serverError(ctx.allocator);
+            if (t.required_gates) |required_gates| {
+                w.writeAll("[") catch return serverError(ctx.allocator);
+                for (required_gates, 0..) |gate, gi| {
+                    if (gi > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+                    const gate_json = quoteJson(ctx.allocator, gate) catch return serverError(ctx.allocator);
+                    w.writeAll(gate_json) catch return serverError(ctx.allocator);
+                }
+                w.writeAll("]") catch return serverError(ctx.allocator);
+            } else {
+                w.writeAll("[]") catch return serverError(ctx.allocator);
+            }
             w.writeAll("}") catch return serverError(ctx.allocator);
         }
         w.writeAll("]") catch return serverError(ctx.allocator);
@@ -578,14 +906,23 @@ fn handleAddEvent(ctx: *Context, run_id: []const u8, body: []const u8, raw_reque
     return .{ .status = "201 Created", .body = resp, .status_code = 201 };
 }
 
-fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
-    const events = ctx.store.listEvents(run_id) catch return serverError(ctx.allocator);
-    defer ctx.store.freeEventRows(events);
+fn handleListEvents(ctx: *Context, run_id: []const u8, query: ?[]const u8) HttpResponse {
+    const cursor_str = parseQueryParam(query, "cursor");
+    const limit_str = parseQueryParam(query, "limit");
+    const limit = if (limit_str) |value| (std.fmt.parseInt(i64, value, 10) catch 100) else 100;
+    if (limit <= 0 or limit > 1000) {
+        return respondError(ctx.allocator, 400, "invalid_limit", "limit must be between 1 and 1000");
+    }
+
+    const cursor_id = if (cursor_str) |value| (std.fmt.parseInt(i64, value, 10) catch return respondError(ctx.allocator, 400, "invalid_cursor", "Invalid cursor format")) else null;
+
+    const page = ctx.store.listEventsPage(run_id, cursor_id, limit) catch return serverError(ctx.allocator);
+    defer ctx.store.freeEventPage(page);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var w = buf.writer(ctx.allocator);
-    w.writeAll("[") catch return serverError(ctx.allocator);
-    for (events, 0..) |e, i| {
+    w.writeAll("{\"items\":[") catch return serverError(ctx.allocator);
+    for (page.items, 0..) |e, i| {
         if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
         w.writeAll("{") catch return serverError(ctx.allocator);
         w.print("\"id\":{d},", .{e.id}) catch return serverError(ctx.allocator);
@@ -595,7 +932,14 @@ fn handleListEvents(ctx: *Context, run_id: []const u8) HttpResponse {
         w.print(",\"data\":{s}", .{e.data_json}) catch return serverError(ctx.allocator);
         w.writeAll("}") catch return serverError(ctx.allocator);
     }
-    w.writeAll("]") catch return serverError(ctx.allocator);
+    w.writeAll("],\"next_cursor\":") catch return serverError(ctx.allocator);
+    if (page.next_cursor) |next_cursor| {
+        const next_cursor_json = quoteJson(ctx.allocator, next_cursor) catch return serverError(ctx.allocator);
+        w.writeAll(next_cursor_json) catch return serverError(ctx.allocator);
+    } else {
+        w.writeAll("null") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("}") catch return serverError(ctx.allocator);
 
     return .{ .status = "200 OK", .body = buf.items };
 }
@@ -617,6 +961,8 @@ fn handleTransition(ctx: *Context, run_id: []const u8, body: []const u8, raw_req
         trigger: []const u8,
         instructions: ?[]const u8 = null,
         usage: ?std.json.Value = null,
+        expected_stage: ?[]const u8 = null,
+        expected_task_version: ?i64 = null,
     }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
         return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
     };
@@ -624,11 +970,14 @@ fn handleTransition(ctx: *Context, run_id: []const u8, body: []const u8, raw_req
     const req = parsed.value;
     const usage_json = if (req.usage) |u| (jsonStringify(ctx.allocator, u) catch null) else null;
 
-    const result = ctx.store.transitionRun(run_id, req.trigger, req.instructions, usage_json) catch |err| {
+    const result = ctx.store.transitionRun(run_id, req.trigger, req.instructions, usage_json, req.expected_stage, req.expected_task_version) catch |err| {
         return switch (err) {
             error.RunNotFound => respondError(ctx.allocator, 404, "not_found", "Run not found"),
             error.RunNotRunning => respondError(ctx.allocator, 409, "conflict", "Run is not in running state"),
             error.InvalidTransition => respondError(ctx.allocator, 400, "invalid_transition", "No valid transition for this trigger from current stage"),
+            error.RequiredGatesNotPassed => respondError(ctx.allocator, 409, "required_gates_not_passed", "Required quality gates are not passed"),
+            error.ExpectedStageMismatch => respondError(ctx.allocator, 409, "expected_stage_mismatch", "Current task stage does not match expected_stage"),
+            error.TaskVersionMismatch => respondError(ctx.allocator, 409, "task_version_mismatch", "Current task version does not match expected_task_version"),
             else => serverError(ctx.allocator),
         };
     };
@@ -701,14 +1050,28 @@ fn handleAddArtifact(ctx: *Context, body: []const u8) HttpResponse {
 fn handleListArtifacts(ctx: *Context, query: ?[]const u8) HttpResponse {
     const task_id = parseQueryParam(query, "task_id");
     const run_id = parseQueryParam(query, "run_id");
+    const cursor = parseQueryParam(query, "cursor");
+    const limit_str = parseQueryParam(query, "limit");
+    const limit = if (limit_str) |value| (std.fmt.parseInt(i64, value, 10) catch 100) else 100;
+    if (limit <= 0 or limit > 1000) {
+        return respondError(ctx.allocator, 400, "invalid_limit", "limit must be between 1 and 1000");
+    }
 
-    const artifacts = ctx.store.listArtifacts(task_id, run_id) catch return serverError(ctx.allocator);
-    defer ctx.store.freeArtifactRows(artifacts);
+    var cursor_created_at_ms: ?i64 = null;
+    var cursor_id: ?[]const u8 = null;
+    if (cursor) |value| {
+        const parsed = parseCompositeCursor(value) orelse return respondError(ctx.allocator, 400, "invalid_cursor", "Invalid cursor format");
+        cursor_created_at_ms = parsed.ts_ms;
+        cursor_id = parsed.id;
+    }
+
+    const page = ctx.store.listArtifactsPage(task_id, run_id, cursor_created_at_ms, cursor_id, limit) catch return serverError(ctx.allocator);
+    defer ctx.store.freeArtifactPage(page);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var w = buf.writer(ctx.allocator);
-    w.writeAll("[") catch return serverError(ctx.allocator);
-    for (artifacts, 0..) |a, i| {
+    w.writeAll("{\"items\":[") catch return serverError(ctx.allocator);
+    for (page.items, 0..) |a, i| {
         if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
         w.writeAll("{") catch return serverError(ctx.allocator);
         writeStringField(&w, ctx.allocator, "id", a.id) catch return serverError(ctx.allocator);
@@ -731,8 +1094,205 @@ fn handleListArtifacts(ctx: *Context, query: ?[]const u8) HttpResponse {
         w.print(",\"meta\":{s}", .{a.meta_json}) catch return serverError(ctx.allocator);
         w.writeAll("}") catch return serverError(ctx.allocator);
     }
-    w.writeAll("]") catch return serverError(ctx.allocator);
+    w.writeAll("],\"next_cursor\":") catch return serverError(ctx.allocator);
+    if (page.next_cursor) |next_cursor| {
+        const next_cursor_json = quoteJson(ctx.allocator, next_cursor) catch return serverError(ctx.allocator);
+        w.writeAll(next_cursor_json) catch return serverError(ctx.allocator);
+    } else {
+        w.writeAll("null") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("}") catch return serverError(ctx.allocator);
 
+    return .{ .status = "200 OK", .body = buf.items };
+}
+
+fn handleAddTaskDependency(ctx: *Context, task_id: []const u8, body: []const u8) HttpResponse {
+    var parsed = std.json.parseFromSlice(struct {
+        depends_on_task_id: []const u8,
+    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
+    };
+    defer parsed.deinit();
+
+    ctx.store.addTaskDependency(task_id, parsed.value.depends_on_task_id) catch |err| {
+        return switch (err) {
+            error.TaskNotFound => respondError(ctx.allocator, 404, "task_not_found", "Task not found"),
+            error.DependencyTaskNotFound => respondError(ctx.allocator, 404, "dependency_task_not_found", "Dependency task not found"),
+            error.InvalidDependency => respondError(ctx.allocator, 400, "invalid_dependency", "Task cannot depend on itself"),
+            error.DuplicateDependency => respondError(ctx.allocator, 409, "duplicate_dependency", "Dependency already exists"),
+            else => serverError(ctx.allocator),
+        };
+    };
+
+    return .{ .status = "201 Created", .body = "{\"status\":\"created\"}", .status_code = 201 };
+}
+
+fn handleListTaskDependencies(ctx: *Context, task_id: []const u8) HttpResponse {
+    const deps = ctx.store.listTaskDependencies(task_id) catch return serverError(ctx.allocator);
+    defer ctx.store.freeDependencyRows(deps);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(ctx.allocator);
+    w.writeAll("[") catch return serverError(ctx.allocator);
+    for (deps, 0..) |dep, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "depends_on_task_id", dep.depends_on_task_id) catch return serverError(ctx.allocator);
+        w.print(",\"resolved\":{s}", .{if (dep.resolved) "true" else "false"}) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]") catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = buf.items };
+}
+
+fn handleAssignTask(ctx: *Context, task_id: []const u8, body: []const u8) HttpResponse {
+    var parsed = std.json.parseFromSlice(struct {
+        agent_id: []const u8,
+        assigned_by: ?[]const u8 = null,
+    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
+    };
+    defer parsed.deinit();
+
+    ctx.store.assignTask(task_id, parsed.value.agent_id, parsed.value.assigned_by) catch |err| {
+        return switch (err) {
+            error.TaskNotFound => respondError(ctx.allocator, 404, "task_not_found", "Task not found"),
+            else => serverError(ctx.allocator),
+        };
+    };
+
+    return .{ .status = "201 Created", .body = "{\"status\":\"assigned\"}", .status_code = 201 };
+}
+
+fn handleListTaskAssignments(ctx: *Context, task_id: []const u8) HttpResponse {
+    const rows = ctx.store.listTaskAssignments(task_id) catch return serverError(ctx.allocator);
+    defer ctx.store.freeAssignmentRows(rows);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(ctx.allocator);
+    w.writeAll("[") catch return serverError(ctx.allocator);
+    for (rows, 0..) |row, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "task_id", row.task_id) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "agent_id", row.agent_id) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeNullableStringField(&w, ctx.allocator, "assigned_by", row.assigned_by) catch return serverError(ctx.allocator);
+        w.print(",\"active\":{s},\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{
+            if (row.active) "true" else "false",
+            row.created_at_ms,
+            row.updated_at_ms,
+        }) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]") catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = buf.items };
+}
+
+fn handleUnassignTask(ctx: *Context, task_id: []const u8, agent_id: []const u8) HttpResponse {
+    const changed = ctx.store.unassignTask(task_id, agent_id) catch return serverError(ctx.allocator);
+    if (!changed) return respondError(ctx.allocator, 404, "not_found", "Assignment not found");
+    return .{ .status = "200 OK", .body = "{\"status\":\"unassigned\"}" };
+}
+
+fn handleAddGateResult(ctx: *Context, run_id: []const u8, body: []const u8, raw_request: []const u8) HttpResponse {
+    const token = extractBearerToken(raw_request) orelse {
+        return respondError(ctx.allocator, 401, "unauthorized", "Missing Authorization header");
+    };
+    ctx.store.validateLeaseByRunId(run_id, token) catch |err| {
+        return switch (err) {
+            error.LeaseNotFound => respondError(ctx.allocator, 404, "not_found", "No active lease for this run"),
+            error.InvalidToken => respondError(ctx.allocator, 401, "unauthorized", "Invalid token"),
+            error.LeaseExpired => respondError(ctx.allocator, 410, "expired", "Lease expired"),
+            else => serverError(ctx.allocator),
+        };
+    };
+
+    var parsed = std.json.parseFromSlice(struct {
+        gate: []const u8,
+        status: []const u8,
+        evidence: ?std.json.Value = null,
+        actor: ?[]const u8 = null,
+    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
+    };
+    defer parsed.deinit();
+
+    if (!std.mem.eql(u8, parsed.value.status, "pass") and !std.mem.eql(u8, parsed.value.status, "fail")) {
+        return respondError(ctx.allocator, 400, "invalid_status", "status must be pass or fail");
+    }
+
+    const evidence_json = if (parsed.value.evidence) |e| (jsonStringify(ctx.allocator, e) catch "{}") else "{}";
+    const id = ctx.store.addGateResult(run_id, parsed.value.gate, parsed.value.status, evidence_json, parsed.value.actor) catch |err| {
+        return switch (err) {
+            error.RunNotFound => respondError(ctx.allocator, 404, "not_found", "Run not found"),
+            else => serverError(ctx.allocator),
+        };
+    };
+
+    const resp = std.fmt.allocPrint(ctx.allocator, "{{\"id\":{d}}}", .{id}) catch return serverError(ctx.allocator);
+    return .{ .status = "201 Created", .body = resp, .status_code = 201 };
+}
+
+fn handleListGateResults(ctx: *Context, run_id: []const u8) HttpResponse {
+    const rows = ctx.store.listGateResults(run_id) catch return serverError(ctx.allocator);
+    defer ctx.store.freeGateResultRows(rows);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(ctx.allocator);
+    w.writeAll("[") catch return serverError(ctx.allocator);
+    for (rows, 0..) |row, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        w.print("\"id\":{d},", .{row.id}) catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "run_id", row.run_id) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "task_id", row.task_id) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "gate", row.gate) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "status", row.status) catch return serverError(ctx.allocator);
+        w.print(",\"evidence\":{s},", .{row.evidence_json}) catch return serverError(ctx.allocator);
+        writeNullableStringField(&w, ctx.allocator, "actor", row.actor) catch return serverError(ctx.allocator);
+        w.print(",\"ts_ms\":{d}", .{row.ts_ms}) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]") catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = buf.items };
+}
+
+fn handleQueueOps(ctx: *Context, query: ?[]const u8) HttpResponse {
+    const near_expiry_ms = if (parseQueryParam(query, "near_expiry_ms")) |value| (std.fmt.parseInt(i64, value, 10) catch 60_000) else 60_000;
+    const stuck_ms = if (parseQueryParam(query, "stuck_ms")) |value| (std.fmt.parseInt(i64, value, 10) catch 300_000) else 300_000;
+
+    const rows = ctx.store.getQueueRoleStats(near_expiry_ms, stuck_ms) catch return serverError(ctx.allocator);
+    defer ctx.store.freeQueueRoleStats(rows);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(ctx.allocator);
+    w.writeAll("{\"roles\":[") catch return serverError(ctx.allocator);
+    for (rows, 0..) |row, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "role", row.role) catch return serverError(ctx.allocator);
+        w.print(",\"claimable_count\":{d}", .{row.claimable_count}) catch return serverError(ctx.allocator);
+        w.writeAll(",\"oldest_claimable_age_ms\":") catch return serverError(ctx.allocator);
+        if (row.oldest_claimable_age_ms) |age| {
+            w.print("{d}", .{age}) catch return serverError(ctx.allocator);
+        } else {
+            w.writeAll("null") catch return serverError(ctx.allocator);
+        }
+        w.print(",\"failed_count\":{d},\"stuck_count\":{d},\"near_expiry_leases\":{d}", .{
+            row.failed_count,
+            row.stuck_count,
+            row.near_expiry_leases,
+        }) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("],") catch return serverError(ctx.allocator);
+    w.print("\"generated_at_ms\":{d}", .{std.time.milliTimestamp()}) catch return serverError(ctx.allocator);
+    w.writeAll("}") catch return serverError(ctx.allocator);
     return .{ .status = "200 OK", .body = buf.items };
 }
 
@@ -781,9 +1341,23 @@ fn writeTaskJsonFields(w: anytype, allocator: std.mem.Allocator, t: store_mod.Ta
     try writeStringField(w, allocator, "title", t.title);
     try w.writeAll(",");
     try writeStringField(w, allocator, "description", t.description);
-    try w.print(",\"priority\":{d},\"metadata\":{s},\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{
+    try w.print(",\"priority\":{d},\"metadata\":{s},\"task_version\":{d},\"next_eligible_at_ms\":{d},\"retry_delay_ms\":{d}", .{
         t.priority,
         t.metadata_json,
+        t.task_version,
+        t.next_eligible_at_ms,
+        t.retry_delay_ms,
+    });
+    if (t.max_attempts) |value| {
+        try w.print(",\"max_attempts\":{d}", .{value});
+    } else {
+        try w.writeAll(",\"max_attempts\":null");
+    }
+    try w.writeAll(",");
+    try writeNullableStringField(w, allocator, "dead_letter_stage", t.dead_letter_stage);
+    try w.writeAll(",");
+    try writeNullableStringField(w, allocator, "dead_letter_reason", t.dead_letter_reason);
+    try w.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{
         t.created_at_ms,
         t.updated_at_ms,
     });
@@ -851,6 +1425,20 @@ pub fn parseQueryParam(query: ?[]const u8, key: []const u8) ?[]const u8 {
         }
     }
     return null;
+}
+
+const CompositeCursor = struct {
+    ts_ms: i64,
+    id: []const u8,
+};
+
+fn parseCompositeCursor(value: []const u8) ?CompositeCursor {
+    const sep = std.mem.indexOfScalar(u8, value, ':') orelse return null;
+    if (sep == 0 or sep + 1 >= value.len) return null;
+    const ts_part = value[0..sep];
+    const id_part = value[sep + 1 ..];
+    const ts = std.fmt.parseInt(i64, ts_part, 10) catch return null;
+    return .{ .ts_ms = ts, .id = id_part };
 }
 
 fn eql(a: ?[]const u8, b: []const u8) bool {

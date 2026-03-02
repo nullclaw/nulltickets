@@ -3,612 +3,449 @@
   "info": {
     "title": "nullTickets API",
     "version": "0.1.0",
-    "description": "Headless task tracker API for autonomous AI agents. Use this schema for agent-side integration and tool generation."
+    "description": "Headless AI task tracker API with leases, quality gates, dependencies, assignments, pagination, and orchestrator ops endpoints."
   },
   "servers": [
-    {
-      "url": "http://127.0.0.1:7700"
-    }
-  ],
-  "tags": [
-    { "name": "discovery" },
-    { "name": "telemetry" },
-    { "name": "health" },
-    { "name": "pipelines" },
-    { "name": "tasks" },
-    { "name": "leases" },
-    { "name": "runs" },
-    { "name": "artifacts" }
+    { "url": "http://127.0.0.1:7700" }
   ],
   "paths": {
     "/openapi.json": {
       "get": {
-        "tags": ["discovery"],
-        "summary": "Get OpenAPI schema",
-        "operationId": "getOpenApi",
+        "summary": "Get OpenAPI document",
         "responses": {
           "200": {
             "description": "OpenAPI document",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
+            "content": { "application/json": { "schema": { "type": "object" } } }
           }
         }
       }
     },
     "/.well-known/openapi.json": {
       "get": {
-        "tags": ["discovery"],
-        "summary": "Get OpenAPI schema (well-known path)",
-        "operationId": "getOpenApiWellKnown",
+        "summary": "Get OpenAPI document (well-known)",
         "responses": {
           "200": {
             "description": "OpenAPI document",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Health status",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } } }
           }
         }
       }
     },
     "/v1/traces": {
       "post": {
-        "tags": ["telemetry"],
-        "summary": "Ingest OTLP traces",
-        "operationId": "ingestOtlpTraces",
+        "summary": "OTLP ingest",
         "requestBody": {
           "required": true,
           "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "description": "OTLP ExportTraceServiceRequest JSON payload."
-              }
-            },
-            "application/x-protobuf": {
-              "schema": {
-                "type": "string",
-                "format": "binary"
-              }
-            }
+            "application/json": { "schema": { "type": "object" } },
+            "application/x-protobuf": { "schema": { "type": "string", "format": "binary" } }
           }
         },
         "responses": {
           "200": {
-            "description": "Payload accepted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OtlpIngestResponse"
-                }
-              }
-            }
-          },
-          "400": { "$ref": "#/components/responses/Error400" },
-          "500": { "$ref": "#/components/responses/Error500" }
+            "description": "Accepted",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OtlpIngestResponse" } } }
+          }
         }
       }
     },
     "/otlp/v1/traces": {
       "post": {
-        "tags": ["telemetry"],
-        "summary": "Ingest OTLP traces (collector path)",
-        "operationId": "ingestOtlpTracesCollector",
+        "summary": "OTLP ingest (collector-compatible path)",
         "requestBody": {
           "required": true,
           "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "description": "OTLP ExportTraceServiceRequest JSON payload."
-              }
-            },
-            "application/x-protobuf": {
-              "schema": {
-                "type": "string",
-                "format": "binary"
-              }
-            }
+            "application/json": { "schema": { "type": "object" } },
+            "application/x-protobuf": { "schema": { "type": "string", "format": "binary" } }
           }
         },
         "responses": {
           "200": {
-            "description": "Payload accepted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OtlpIngestResponse"
-                }
-              }
-            }
-          },
-          "400": { "$ref": "#/components/responses/Error400" },
-          "500": { "$ref": "#/components/responses/Error500" }
-        }
-      }
-    },
-    "/health": {
-      "get": {
-        "tags": ["health"],
-        "summary": "Service health",
-        "operationId": "getHealth",
-        "responses": {
-          "200": {
-            "description": "Health response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HealthResponse"
-                }
-              }
-            }
+            "description": "Accepted",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OtlpIngestResponse" } } }
           }
         }
       }
     },
     "/pipelines": {
       "post": {
-        "tags": ["pipelines"],
         "summary": "Create pipeline",
-        "operationId": "createPipeline",
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PipelineCreateRequest"
-              }
-            }
-          }
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PipelineCreateRequest" } } }
         },
         "responses": {
           "201": {
             "description": "Created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IdResponse"
-                }
-              }
-            }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IdResponse" } } }
           },
           "400": { "$ref": "#/components/responses/Error400" },
-          "409": { "$ref": "#/components/responses/Error409" },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "409": { "$ref": "#/components/responses/Error409" }
         }
       },
       "get": {
-        "tags": ["pipelines"],
         "summary": "List pipelines",
-        "operationId": "listPipelines",
         "responses": {
           "200": {
-            "description": "Pipeline list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Pipeline"
-                  }
-                }
-              }
-            }
-          },
-          "500": { "$ref": "#/components/responses/Error500" }
+            "description": "Pipelines",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Pipeline" } } } }
+          }
         }
       }
     },
     "/pipelines/{id}": {
       "get": {
-        "tags": ["pipelines"],
-        "summary": "Get pipeline by id",
-        "operationId": "getPipeline",
+        "summary": "Get pipeline",
         "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string" }
-          }
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
             "description": "Pipeline",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Pipeline"
-                }
-              }
-            }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pipeline" } } }
           },
-          "404": { "$ref": "#/components/responses/Error404" },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "404": { "$ref": "#/components/responses/Error404" }
         }
       }
     },
     "/tasks": {
       "post": {
-        "tags": ["tasks"],
         "summary": "Create task",
-        "operationId": "createTask",
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TaskCreateRequest"
-              }
-            }
-          }
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskCreateRequest" } } }
         },
         "responses": {
           "201": {
             "description": "Created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IdResponse"
-                }
-              }
-            }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IdResponse" } } }
           },
-          "404": { "$ref": "#/components/responses/Error404" },
           "400": { "$ref": "#/components/responses/Error400" },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "404": { "$ref": "#/components/responses/Error404" },
+          "409": { "$ref": "#/components/responses/Error409" }
         }
       },
       "get": {
-        "tags": ["tasks"],
-        "summary": "List tasks",
-        "operationId": "listTasks",
+        "summary": "List tasks (cursor paginated)",
         "parameters": [
           { "name": "stage", "in": "query", "required": false, "schema": { "type": "string" } },
           { "name": "pipeline_id", "in": "query", "required": false, "schema": { "type": "string" } },
-          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 1000 } },
+          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
-            "description": "Task list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Task"
-                  }
-                }
-              }
-            }
+            "description": "Task page",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaginatedTasks" } } }
           },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "400": { "$ref": "#/components/responses/Error400" }
+        }
+      }
+    },
+    "/tasks/bulk": {
+      "post": {
+        "summary": "Bulk create tasks",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BulkTaskCreateRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BulkTaskCreateResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "404": { "$ref": "#/components/responses/Error404" },
+          "409": { "$ref": "#/components/responses/Error409" }
         }
       }
     },
     "/tasks/{id}": {
       "get": {
-        "tags": ["tasks"],
-        "summary": "Get task by id",
-        "operationId": "getTask",
+        "summary": "Get task details",
         "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string" }
-          }
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
             "description": "Task details",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TaskDetails"
-                }
-              }
-            }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TaskDetails" } } }
           },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      }
+    },
+    "/tasks/{id}/dependencies": {
+      "post": {
+        "summary": "Add task dependency",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DependencyCreateRequest" } } }
+        },
+        "responses": {
+          "201": { "description": "Created" },
+          "400": { "$ref": "#/components/responses/Error400" },
           "404": { "$ref": "#/components/responses/Error404" },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "409": { "$ref": "#/components/responses/Error409" }
+        }
+      },
+      "get": {
+        "summary": "List task dependencies",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dependencies",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Dependency" } } } }
+          }
+        }
+      }
+    },
+    "/tasks/{id}/assignments": {
+      "post": {
+        "summary": "Assign task to agent",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AssignmentCreateRequest" } } }
+        },
+        "responses": {
+          "201": { "description": "Created" },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      },
+      "get": {
+        "summary": "List task assignments",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assignments",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Assignment" } } } }
+          }
+        }
+      }
+    },
+    "/tasks/{id}/assignments/{agent_id}": {
+      "delete": {
+        "summary": "Unassign task from agent",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "agent_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Unassigned" },
+          "404": { "$ref": "#/components/responses/Error404" }
         }
       }
     },
     "/leases/claim": {
       "post": {
-        "tags": ["leases"],
-        "summary": "Claim next task by role",
-        "operationId": "claimTask",
+        "summary": "Claim next task",
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LeaseClaimRequest"
-              }
-            }
-          }
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeaseClaimRequest" } } }
         },
         "responses": {
           "200": {
             "description": "Claimed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ClaimResponse"
-                }
-              }
-            }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClaimResponse" } } }
           },
-          "204": {
-            "description": "No available task"
-          },
-          "400": { "$ref": "#/components/responses/Error400" },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "204": { "description": "No work" }
         }
       }
     },
     "/leases/{id}/heartbeat": {
       "post": {
-        "tags": ["leases"],
-        "summary": "Heartbeat lease",
-        "operationId": "heartbeatLease",
+        "summary": "Extend lease",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string" }
-          }
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
-            "description": "Heartbeat accepted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HeartbeatResponse"
-                }
-              }
-            }
+            "description": "Extended",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "expires_at_ms": { "type": "integer" } }, "required": ["expires_at_ms"] } } }
           },
           "401": { "$ref": "#/components/responses/Error401" },
           "404": { "$ref": "#/components/responses/Error404" },
-          "410": { "$ref": "#/components/responses/Error410" },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "410": { "$ref": "#/components/responses/Error410" }
         }
       }
     },
     "/runs/{id}/events": {
       "post": {
-        "tags": ["runs"],
         "summary": "Append run event",
-        "operationId": "addRunEvent",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string" }
-          }
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EventCreateRequest"
-              }
-            }
-          }
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventCreateRequest" } } }
         },
         "responses": {
           "201": {
-            "description": "Event created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "required": ["id"],
-                  "properties": {
-                    "id": { "type": "integer" }
-                  }
-                }
-              }
-            }
+            "description": "Created",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "integer" } }, "required": ["id"] } } }
           },
           "401": { "$ref": "#/components/responses/Error401" },
           "404": { "$ref": "#/components/responses/Error404" },
-          "410": { "$ref": "#/components/responses/Error410" },
-          "400": { "$ref": "#/components/responses/Error400" },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "410": { "$ref": "#/components/responses/Error410" }
         }
       },
       "get": {
-        "tags": ["runs"],
-        "summary": "List run events",
-        "operationId": "listRunEvents",
+        "summary": "List run events (cursor paginated)",
         "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string" }
-          }
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 1000 } },
+          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "integer" } }
         ],
         "responses": {
           "200": {
-            "description": "Events list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/RunEvent"
-                  }
-                }
-              }
-            }
+            "description": "Event page",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaginatedRunEvents" } } }
+          }
+        }
+      }
+    },
+    "/runs/{id}/gates": {
+      "post": {
+        "summary": "Record gate result",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GateResultCreateRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "integer" } }, "required": ["id"] } } }
           },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "401": { "$ref": "#/components/responses/Error401" },
+          "404": { "$ref": "#/components/responses/Error404" },
+          "410": { "$ref": "#/components/responses/Error410" }
+        }
+      },
+      "get": {
+        "summary": "List gate results",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Gate results",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/GateResult" } } } }
+          }
         }
       }
     },
     "/runs/{id}/transition": {
       "post": {
-        "tags": ["runs"],
-        "summary": "Transition run and task stage",
-        "operationId": "transitionRun",
+        "summary": "Transition task stage",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string" }
-          }
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TransitionRequest"
-              }
-            }
-          }
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionRequest" } } }
         },
         "responses": {
           "200": {
-            "description": "Transition completed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TransitionResponse"
-                }
-              }
-            }
+            "description": "Transition result",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResponse" } } }
           },
           "400": { "$ref": "#/components/responses/Error400" },
           "401": { "$ref": "#/components/responses/Error401" },
           "404": { "$ref": "#/components/responses/Error404" },
           "409": { "$ref": "#/components/responses/Error409" },
-          "410": { "$ref": "#/components/responses/Error410" },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "410": { "$ref": "#/components/responses/Error410" }
         }
       }
     },
     "/runs/{id}/fail": {
       "post": {
-        "tags": ["runs"],
         "summary": "Fail run",
-        "operationId": "failRun",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": { "type": "string" }
-          }
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FailRequest"
-              }
-            }
-          }
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FailRequest" } } }
         },
         "responses": {
-          "200": {
-            "description": "Run failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "required": ["status"],
-                  "properties": {
-                    "status": { "type": "string" }
-                  }
-                }
-              }
-            }
-          },
-          "400": { "$ref": "#/components/responses/Error400" },
+          "200": { "description": "Failed" },
           "401": { "$ref": "#/components/responses/Error401" },
           "404": { "$ref": "#/components/responses/Error404" },
-          "410": { "$ref": "#/components/responses/Error410" },
-          "500": { "$ref": "#/components/responses/Error500" }
+          "410": { "$ref": "#/components/responses/Error410" }
         }
       }
     },
     "/artifacts": {
       "post": {
-        "tags": ["artifacts"],
-        "summary": "Create artifact",
-        "operationId": "createArtifact",
+        "summary": "Add artifact",
         "requestBody": {
           "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ArtifactCreateRequest"
-              }
-            }
-          }
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArtifactCreateRequest" } } }
         },
         "responses": {
           "201": {
             "description": "Created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IdResponse"
-                }
-              }
-            }
-          },
-          "400": { "$ref": "#/components/responses/Error400" },
-          "500": { "$ref": "#/components/responses/Error500" }
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IdResponse" } } }
+          }
         }
       },
       "get": {
-        "tags": ["artifacts"],
-        "summary": "List artifacts",
-        "operationId": "listArtifacts",
+        "summary": "List artifacts (cursor paginated)",
         "parameters": [
           { "name": "task_id", "in": "query", "required": false, "schema": { "type": "string" } },
-          { "name": "run_id", "in": "query", "required": false, "schema": { "type": "string" } }
+          { "name": "run_id", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 1000 } },
+          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
-            "description": "Artifact list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Artifact"
-                  }
-                }
-              }
-            }
-          },
-          "500": { "$ref": "#/components/responses/Error500" }
+            "description": "Artifact page",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaginatedArtifacts" } } }
+          }
+        }
+      }
+    },
+    "/ops/queue": {
+      "get": {
+        "summary": "Queue role stats for orchestrator",
+        "parameters": [
+          { "name": "near_expiry_ms", "in": "query", "required": false, "schema": { "type": "integer" } },
+          { "name": "stuck_ms", "in": "query", "required": false, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Queue stats",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QueueOpsResponse" } } }
+          }
         }
       }
     }
@@ -622,54 +459,11 @@
       }
     },
     "responses": {
-      "Error400": {
-        "description": "Bad Request",
-        "content": {
-          "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
-          }
-        }
-      },
-      "Error401": {
-        "description": "Unauthorized",
-        "content": {
-          "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
-          }
-        }
-      },
-      "Error404": {
-        "description": "Not Found",
-        "content": {
-          "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
-          }
-        }
-      },
-      "Error409": {
-        "description": "Conflict",
-        "content": {
-          "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
-          }
-        }
-      },
-      "Error410": {
-        "description": "Gone",
-        "content": {
-          "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
-          }
-        }
-      },
-      "Error500": {
-        "description": "Internal Server Error",
-        "content": {
-          "application/json": {
-            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
-          }
-        }
-      }
+      "Error400": { "description": "Bad request", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+      "Error401": { "description": "Unauthorized", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+      "Error404": { "description": "Not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+      "Error409": { "description": "Conflict", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+      "Error410": { "description": "Expired", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
     },
     "schemas": {
       "ErrorResponse": {
@@ -689,8 +483,15 @@
       "IdResponse": {
         "type": "object",
         "required": ["id"],
+        "properties": { "id": { "type": "string" } }
+      },
+      "OtlpIngestResponse": {
+        "type": "object",
+        "required": ["batch_id", "accepted_spans", "stored"],
         "properties": {
-          "id": { "type": "string" }
+          "batch_id": { "type": "integer" },
+          "accepted_spans": { "type": "integer" },
+          "stored": { "type": "string", "enum": ["json", "blob"] }
         }
       },
       "HealthStageCount": {
@@ -707,28 +508,24 @@
         "properties": {
           "status": { "type": "string" },
           "version": { "type": "string" },
-          "tasks_by_stage": {
-            "type": "array",
-            "items": { "$ref": "#/components/schemas/HealthStageCount" }
-          },
+          "tasks_by_stage": { "type": "array", "items": { "$ref": "#/components/schemas/HealthStageCount" } },
           "active_leases": { "type": "integer" }
         }
       },
-      "OtlpIngestResponse": {
+      "RetryPolicy": {
         "type": "object",
-        "required": ["batch_id", "accepted_spans", "stored"],
         "properties": {
-          "batch_id": { "type": "integer" },
-          "accepted_spans": { "type": "integer" },
-          "stored": { "type": "string", "enum": ["json", "blob"] }
+          "max_attempts": { "type": ["integer", "null"] },
+          "retry_delay_ms": { "type": "integer" },
+          "dead_letter_stage": { "type": ["string", "null"] }
         }
       },
       "PipelineStateDef": {
         "type": "object",
         "properties": {
-          "agent_role": { "type": "string" },
-          "description": { "type": "string" },
-          "terminal": { "type": "boolean" }
+          "agent_role": { "type": ["string", "null"] },
+          "description": { "type": ["string", "null"] },
+          "terminal": { "type": ["boolean", "null"] }
         }
       },
       "PipelineTransitionDef": {
@@ -738,7 +535,8 @@
           "from": { "type": "string" },
           "to": { "type": "string" },
           "trigger": { "type": "string" },
-          "instructions": { "type": "string" }
+          "instructions": { "type": ["string", "null"] },
+          "required_gates": { "type": ["array", "null"], "items": { "type": "string" } }
         }
       },
       "PipelineDefinition": {
@@ -746,14 +544,8 @@
         "required": ["initial", "states", "transitions"],
         "properties": {
           "initial": { "type": "string" },
-          "states": {
-            "type": "object",
-            "additionalProperties": { "$ref": "#/components/schemas/PipelineStateDef" }
-          },
-          "transitions": {
-            "type": "array",
-            "items": { "$ref": "#/components/schemas/PipelineTransitionDef" }
-          }
+          "states": { "type": "object", "additionalProperties": { "$ref": "#/components/schemas/PipelineStateDef" } },
+          "transitions": { "type": "array", "items": { "$ref": "#/components/schemas/PipelineTransitionDef" } }
         }
       },
       "PipelineCreateRequest": {
@@ -782,22 +574,30 @@
           "title": { "type": "string" },
           "description": { "type": "string" },
           "priority": { "type": "integer" },
-          "metadata": {}
+          "metadata": { "type": ["object", "null"], "additionalProperties": true },
+          "retry_policy": { "$ref": "#/components/schemas/RetryPolicy" },
+          "dependencies": { "type": ["array", "null"], "items": { "type": "string" } },
+          "assigned_agent_id": { "type": ["string", "null"] },
+          "assigned_by": { "type": ["string", "null"] }
+        }
+      },
+      "BulkTaskCreateRequest": {
+        "type": "object",
+        "required": ["tasks"],
+        "properties": {
+          "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/TaskCreateRequest" }, "minItems": 1 }
+        }
+      },
+      "BulkTaskCreateResponse": {
+        "type": "object",
+        "required": ["ids"],
+        "properties": {
+          "ids": { "type": "array", "items": { "type": "string" } }
         }
       },
       "Task": {
         "type": "object",
-        "required": [
-          "id",
-          "pipeline_id",
-          "stage",
-          "title",
-          "description",
-          "priority",
-          "metadata",
-          "created_at_ms",
-          "updated_at_ms"
-        ],
+        "required": ["id", "pipeline_id", "stage", "title", "description", "priority", "metadata", "task_version", "next_eligible_at_ms", "retry_delay_ms", "created_at_ms", "updated_at_ms"],
         "properties": {
           "id": { "type": "string" },
           "pipeline_id": { "type": "string" },
@@ -805,7 +605,54 @@
           "title": { "type": "string" },
           "description": { "type": "string" },
           "priority": { "type": "integer" },
-          "metadata": {},
+          "metadata": { "type": "object", "additionalProperties": true },
+          "task_version": { "type": "integer" },
+          "next_eligible_at_ms": { "type": "integer" },
+          "max_attempts": { "type": ["integer", "null"] },
+          "retry_delay_ms": { "type": "integer" },
+          "dead_letter_stage": { "type": ["string", "null"] },
+          "dead_letter_reason": { "type": ["string", "null"] },
+          "created_at_ms": { "type": "integer" },
+          "updated_at_ms": { "type": "integer" }
+        }
+      },
+      "PaginatedTasks": {
+        "type": "object",
+        "required": ["items", "next_cursor"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } },
+          "next_cursor": { "type": ["string", "null"] }
+        }
+      },
+      "DependencyCreateRequest": {
+        "type": "object",
+        "required": ["depends_on_task_id"],
+        "properties": { "depends_on_task_id": { "type": "string" } }
+      },
+      "Dependency": {
+        "type": "object",
+        "required": ["depends_on_task_id", "resolved"],
+        "properties": {
+          "depends_on_task_id": { "type": "string" },
+          "resolved": { "type": "boolean" }
+        }
+      },
+      "AssignmentCreateRequest": {
+        "type": "object",
+        "required": ["agent_id"],
+        "properties": {
+          "agent_id": { "type": "string" },
+          "assigned_by": { "type": ["string", "null"] }
+        }
+      },
+      "Assignment": {
+        "type": "object",
+        "required": ["task_id", "agent_id", "active", "created_at_ms", "updated_at_ms"],
+        "properties": {
+          "task_id": { "type": "string" },
+          "agent_id": { "type": "string" },
+          "assigned_by": { "type": ["string", "null"] },
+          "active": { "type": "boolean" },
           "created_at_ms": { "type": "integer" },
           "updated_at_ms": { "type": "integer" }
         }
@@ -826,10 +673,11 @@
       },
       "AvailableTransition": {
         "type": "object",
-        "required": ["trigger", "to"],
+        "required": ["trigger", "to", "required_gates"],
         "properties": {
           "trigger": { "type": "string" },
-          "to": { "type": "string" }
+          "to": { "type": "string" },
+          "required_gates": { "type": "array", "items": { "type": "string" } }
         }
       },
       "TaskDetails": {
@@ -838,16 +686,10 @@
           {
             "type": "object",
             "properties": {
-              "latest_run": {
-                "oneOf": [
-                  { "$ref": "#/components/schemas/Run" },
-                  { "type": "null" }
-                ]
-              },
-              "available_transitions": {
-                "type": "array",
-                "items": { "$ref": "#/components/schemas/AvailableTransition" }
-              }
+              "latest_run": { "$ref": "#/components/schemas/Run" },
+              "dependencies": { "type": "array", "items": { "$ref": "#/components/schemas/Dependency" } },
+              "assignments": { "type": "array", "items": { "$ref": "#/components/schemas/Assignment" } },
+              "available_transitions": { "type": "array", "items": { "$ref": "#/components/schemas/AvailableTransition" } }
             }
           }
         ]
@@ -872,19 +714,12 @@
           "expires_at_ms": { "type": "integer" }
         }
       },
-      "HeartbeatResponse": {
-        "type": "object",
-        "required": ["expires_at_ms"],
-        "properties": {
-          "expires_at_ms": { "type": "integer" }
-        }
-      },
       "EventCreateRequest": {
         "type": "object",
         "required": ["kind"],
         "properties": {
           "kind": { "type": "string" },
-          "data": {}
+          "data": { "type": ["object", "null"], "additionalProperties": true }
         }
       },
       "RunEvent": {
@@ -895,7 +730,39 @@
           "run_id": { "type": "string" },
           "ts_ms": { "type": "integer" },
           "kind": { "type": "string" },
-          "data": {}
+          "data": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "PaginatedRunEvents": {
+        "type": "object",
+        "required": ["items", "next_cursor"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/RunEvent" } },
+          "next_cursor": { "type": ["string", "null"] }
+        }
+      },
+      "GateResultCreateRequest": {
+        "type": "object",
+        "required": ["gate", "status"],
+        "properties": {
+          "gate": { "type": "string" },
+          "status": { "type": "string", "enum": ["pass", "fail"] },
+          "evidence": { "type": ["object", "null"], "additionalProperties": true },
+          "actor": { "type": ["string", "null"] }
+        }
+      },
+      "GateResult": {
+        "type": "object",
+        "required": ["id", "run_id", "task_id", "gate", "status", "evidence", "ts_ms"],
+        "properties": {
+          "id": { "type": "integer" },
+          "run_id": { "type": "string" },
+          "task_id": { "type": "string" },
+          "gate": { "type": "string" },
+          "status": { "type": "string", "enum": ["pass", "fail"] },
+          "evidence": { "type": "object", "additionalProperties": true },
+          "actor": { "type": ["string", "null"] },
+          "ts_ms": { "type": "integer" }
         }
       },
       "TransitionRequest": {
@@ -903,8 +770,10 @@
         "required": ["trigger"],
         "properties": {
           "trigger": { "type": "string" },
-          "instructions": { "type": "string" },
-          "usage": {}
+          "instructions": { "type": ["string", "null"] },
+          "usage": { "type": ["object", "null"], "additionalProperties": true },
+          "expected_stage": { "type": ["string", "null"] },
+          "expected_task_version": { "type": ["integer", "null"] }
         }
       },
       "TransitionResponse": {
@@ -921,20 +790,20 @@
         "required": ["error"],
         "properties": {
           "error": { "type": "string" },
-          "usage": {}
+          "usage": { "type": ["object", "null"], "additionalProperties": true }
         }
       },
       "ArtifactCreateRequest": {
         "type": "object",
         "required": ["kind", "uri"],
         "properties": {
-          "task_id": { "type": "string" },
-          "run_id": { "type": "string" },
+          "task_id": { "type": ["string", "null"] },
+          "run_id": { "type": ["string", "null"] },
           "kind": { "type": "string" },
           "uri": { "type": "string" },
-          "sha256": { "type": "string" },
-          "size_bytes": { "type": "integer" },
-          "meta": {}
+          "sha256": { "type": ["string", "null"] },
+          "size_bytes": { "type": ["integer", "null"] },
+          "meta": { "type": ["object", "null"], "additionalProperties": true }
         }
       },
       "Artifact": {
@@ -949,7 +818,35 @@
           "uri": { "type": "string" },
           "sha256": { "type": ["string", "null"] },
           "size_bytes": { "type": ["integer", "null"] },
-          "meta": {}
+          "meta": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "PaginatedArtifacts": {
+        "type": "object",
+        "required": ["items", "next_cursor"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Artifact" } },
+          "next_cursor": { "type": ["string", "null"] }
+        }
+      },
+      "QueueRoleStats": {
+        "type": "object",
+        "required": ["role", "claimable_count", "oldest_claimable_age_ms", "failed_count", "stuck_count", "near_expiry_leases"],
+        "properties": {
+          "role": { "type": "string" },
+          "claimable_count": { "type": "integer" },
+          "oldest_claimable_age_ms": { "type": ["integer", "null"] },
+          "failed_count": { "type": "integer" },
+          "stuck_count": { "type": "integer" },
+          "near_expiry_leases": { "type": "integer" }
+        }
+      },
+      "QueueOpsResponse": {
+        "type": "object",
+        "required": ["roles", "generated_at_ms"],
+        "properties": {
+          "roles": { "type": "array", "items": { "$ref": "#/components/schemas/QueueRoleStats" } },
+          "generated_at_ms": { "type": "integer" }
         }
       }
     }

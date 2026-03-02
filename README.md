@@ -66,16 +66,25 @@ bash tests/test_e2e.sh
 | `GET` | `/pipelines` | List pipelines |
 | `GET` | `/pipelines/{id}` | Get pipeline by id |
 | `POST` | `/tasks` | Create task |
-| `GET` | `/tasks?stage=&pipeline_id=&limit=` | List tasks |
+| `POST` | `/tasks/bulk` | Bulk create tasks |
+| `GET` | `/tasks?stage=&pipeline_id=&limit=&cursor=` | List tasks (cursor paginated) |
 | `GET` | `/tasks/{id}` | Get task details |
+| `POST` | `/tasks/{id}/dependencies` | Add dependency |
+| `GET` | `/tasks/{id}/dependencies` | List dependencies |
+| `POST` | `/tasks/{id}/assignments` | Assign task to agent |
+| `GET` | `/tasks/{id}/assignments` | List assignments |
+| `DELETE` | `/tasks/{id}/assignments/{agent_id}` | Unassign task |
 | `POST` | `/leases/claim` | Claim next task by role |
 | `POST` | `/leases/{id}/heartbeat` | Extend lease |
 | `POST` | `/runs/{id}/events` | Append run event |
-| `GET` | `/runs/{id}/events` | List run events |
+| `GET` | `/runs/{id}/events?limit=&cursor=` | List run events (cursor paginated) |
+| `POST` | `/runs/{id}/gates` | Add quality gate result |
+| `GET` | `/runs/{id}/gates` | List quality gate results |
 | `POST` | `/runs/{id}/transition` | Move task to next stage |
 | `POST` | `/runs/{id}/fail` | Mark run as failed |
 | `POST` | `/artifacts` | Attach artifact |
-| `GET` | `/artifacts?task_id=&run_id=` | List artifacts |
+| `GET` | `/artifacts?task_id=&run_id=&limit=&cursor=` | List artifacts (cursor paginated) |
+| `GET` | `/ops/queue` | Per-role queue stats for orchestrator |
 
 ## Agent Loop
 
@@ -85,8 +94,13 @@ POST /leases/claim { agent_id, agent_role, lease_ttl_ms? }
 -> 204 (no work)
 
 POST /runs/{run_id}/events      (Bearer <lease_token>)
+POST /runs/{run_id}/gates       (Bearer <lease_token>)
 POST /runs/{run_id}/transition  (Bearer <lease_token>)
 POST /runs/{run_id}/fail        (Bearer <lease_token>)
+
+GET /tasks?limit=&cursor=
+GET /runs/{run_id}/events?limit=&cursor=
+GET /artifacts?limit=&cursor=
 ```
 
 For practical `nullclaw` integration patterns (single-agent first, multi-agent optional), see [nullclaw.md](nullclaw.md).

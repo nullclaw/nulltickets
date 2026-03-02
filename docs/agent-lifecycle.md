@@ -21,8 +21,11 @@ Agents are expected to run a continuous loop:
 ## Failure and Retry
 
 - `POST /runs/{id}/fail` marks run as failed and releases lease.
-- Task stays in current stage and can be claimed again.
-- Repeated failures can emit exhaustion events for monitoring.
+- Task retry behavior is controlled by task retry policy:
+  - `retry_delay_ms` schedules next eligibility
+  - `max_attempts` limits retries
+  - `dead_letter_stage` (optional) reroutes exhausted tasks
+- Exhausted tasks set `dead_letter_reason` and emit `dead_letter` events.
 
 ## Handoff Between Roles
 

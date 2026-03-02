@@ -19,6 +19,10 @@ State metadata supports:
 - `description`: optional description
 - `terminal`: whether this stage is terminal
 
+Transition metadata supports:
+
+- `required_gates`: quality gates that must be passed before transition
+
 ## Transition Rules
 
 - Every transition must reference existing states.
@@ -35,8 +39,34 @@ State metadata supports:
 ## Operational Notes
 
 - Claim eligibility depends on current stage `agent_role`.
+- Claim excludes tasks blocked by unresolved dependencies.
+- Claim excludes tasks assigned to another agent.
+- Claim excludes tasks that are not yet eligible by retry delay.
 - Stage changes only happen through `/runs/{id}/transition`.
-- Failed runs do not automatically change stage.
+- Transitions can enforce optimistic checks: `expected_stage` and `expected_task_version`.
+- Failed runs apply retry policy (`max_attempts`, `retry_delay_ms`) and may move task to `dead_letter_stage`.
+
+## Dependencies (DAG)
+
+- Add edge: `POST /tasks/{id}/dependencies`
+- Inspect: `GET /tasks/{id}/dependencies`
+
+Dependencies are resolved only when the upstream task reaches a terminal pipeline stage.
+
+## Quality Gates
+
+- Add gate result: `POST /runs/{id}/gates`
+- Inspect gate history: `GET /runs/{id}/gates`
+
+`/runs/{id}/transition` returns `409` if required gates are not passed.
+
+## Assignments (Optional)
+
+- Assign: `POST /tasks/{id}/assignments`
+- List: `GET /tasks/{id}/assignments`
+- Unassign: `DELETE /tasks/{id}/assignments/{agent_id}`
+
+Assignments are optional and intended for multi-agent orchestration.
 
 ## No-Orchestrator Baseline
 
@@ -55,3 +85,4 @@ Add an external orchestrator only when you need:
 - Multiple agents and dynamic assignments
 - Global prioritization and capacity balancing
 - Advanced retry/escalation policies
+- Queue observability via `GET /ops/queue`

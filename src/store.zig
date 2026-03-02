@@ -34,6 +34,12 @@ pub const TaskRow = struct {
     description: []const u8,
     priority: i64,
     metadata_json: []const u8,
+    task_version: i64,
+    next_eligible_at_ms: i64,
+    max_attempts: ?i64,
+    retry_delay_ms: i64,
+    dead_letter_stage: ?[]const u8,
+    dead_letter_reason: ?[]const u8,
     created_at_ms: i64,
     updated_at_ms: i64,
 };
@@ -69,6 +75,62 @@ pub const ArtifactRow = struct {
     sha256_hex: ?[]const u8,
     size_bytes: ?i64,
     meta_json: []const u8,
+};
+
+pub const DependencyRow = struct {
+    depends_on_task_id: []const u8,
+    resolved: bool,
+};
+
+pub const GateResultRow = struct {
+    id: i64,
+    run_id: []const u8,
+    task_id: []const u8,
+    gate: []const u8,
+    status: []const u8,
+    evidence_json: []const u8,
+    actor: ?[]const u8,
+    ts_ms: i64,
+};
+
+pub const AssignmentRow = struct {
+    task_id: []const u8,
+    agent_id: []const u8,
+    assigned_by: ?[]const u8,
+    active: bool,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+};
+
+pub const IdempotencyRow = struct {
+    request_hash: [32]u8,
+    response_status: i64,
+    response_body: []const u8,
+    created_at_ms: i64,
+};
+
+pub const QueueRoleStats = struct {
+    role: []const u8,
+    claimable_count: i64,
+    oldest_claimable_age_ms: ?i64,
+    failed_count: i64,
+    stuck_count: i64,
+    near_expiry_leases: i64,
+};
+
+pub const TaskPage = struct {
+    items: []TaskRow,
+    next_cursor: ?[]const u8,
+};
+
+pub const EventPage = struct {
+    items: []EventRow,
+    next_cursor: ?[]const u8,
+};
+
+pub const ArtifactPage = struct {
+    items: []ArtifactRow,
+    next_cursor: ?[]const u8,
 };
 
 pub const ClaimResult = struct {
@@ -167,6 +229,54 @@ pub const Store = struct {
             }
             return error.MigrationFailed;
         }
+
+        try self.ensureColumn(
+            "tasks",
+            "task_version",
+            "ALTER TABLE tasks ADD COLUMN task_version INTEGER NOT NULL DEFAULT 1;",
+        );
+        try self.ensureColumn(
+            "tasks",
+            "next_eligible_at_ms",
+            "ALTER TABLE tasks ADD COLUMN next_eligible_at_ms INTEGER NOT NULL DEFAULT 0;",
+        );
+        try self.ensureColumn(
+            "tasks",
+            "max_attempts",
+            "ALTER TABLE tasks ADD COLUMN max_attempts INTEGER;",
+        );
+        try self.ensureColumn(
+            "tasks",
+            "retry_delay_ms",
+            "ALTER TABLE tasks ADD COLUMN retry_delay_ms INTEGER NOT NULL DEFAULT 0;",
+        );
+        try self.ensureColumn(
+            "tasks",
+            "dead_letter_stage",
+            "ALTER TABLE tasks ADD COLUMN dead_letter_stage TEXT;",
+        );
+        try self.ensureColumn(
+            "tasks",
+            "dead_letter_reason",
+            "ALTER TABLE tasks ADD COLUMN dead_letter_reason TEXT;",
+        );
+
+        try self.execSimple("CREATE INDEX IF NOT EXISTS idx_tasks_next_eligible ON tasks(next_eligible_at_ms);");
+        try self.execSimple("CREATE INDEX IF NOT EXISTS idx_tasks_dead_letter_reason ON tasks(dead_letter_reason);");
+    }
+
+    fn ensureColumn(self: *Self, table_name: []const u8, column_name: []const u8, alter_sql: [*:0]const u8) !void {
+        var pragma_buf: [128]u8 = undefined;
+        const pragma_sql = std.fmt.bufPrintZ(&pragma_buf, "PRAGMA table_info({s});", .{table_name}) catch return error.PrepareFailed;
+        const stmt = try self.prepare(pragma_sql);
+        defer _ = c.sqlite3_finalize(stmt);
+
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            const col_name = self.colTextView(stmt, 1);
+            if (std.mem.eql(u8, col_name, column_name)) return;
+        }
+
+        try self.execSimple(alter_sql);
     }
 
     // ===== Health =====
@@ -282,7 +392,17 @@ pub const Store = struct {
 
     // ===== Tasks =====
 
-    pub fn createTask(self: *Self, pipeline_id: []const u8, title: []const u8, description: []const u8, priority: i64, metadata_json: []const u8) ![]const u8 {
+    pub fn createTask(
+        self: *Self,
+        pipeline_id: []const u8,
+        title: []const u8,
+        description: []const u8,
+        priority: i64,
+        metadata_json: []const u8,
+        max_attempts: ?i64,
+        retry_delay_ms: i64,
+        dead_letter_stage: ?[]const u8,
+    ) ![]const u8 {
         // Verify pipeline exists and get initial stage
         const pipeline = try self.getPipeline(pipeline_id) orelse return error.PipelineNotFound;
         defer self.freePipelineRow(pipeline);
@@ -298,7 +418,9 @@ pub const Store = struct {
         errdefer self.allocator.free(id);
         const now_ms = ids.nowMs();
 
-        const stmt = try self.prepare("INSERT INTO tasks (id, pipeline_id, stage, title, description, priority, metadata_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);");
+        const stmt = try self.prepare(
+            "INSERT INTO tasks (id, pipeline_id, stage, title, description, priority, metadata_json, task_version, next_eligible_at_ms, max_attempts, retry_delay_ms, dead_letter_stage, dead_letter_reason, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, NULL, ?, ?);",
+        );
         defer _ = c.sqlite3_finalize(stmt);
 
         self.bindText(stmt, 1, id);
@@ -308,8 +430,11 @@ pub const Store = struct {
         self.bindText(stmt, 5, description);
         _ = c.sqlite3_bind_int64(stmt, 6, priority);
         self.bindText(stmt, 7, metadata_json);
-        _ = c.sqlite3_bind_int64(stmt, 8, now_ms);
-        _ = c.sqlite3_bind_int64(stmt, 9, now_ms);
+        if (max_attempts) |val| _ = c.sqlite3_bind_int64(stmt, 8, val) else _ = c.sqlite3_bind_null(stmt, 8);
+        _ = c.sqlite3_bind_int64(stmt, 9, retry_delay_ms);
+        if (dead_letter_stage) |stage| self.bindText(stmt, 10, stage) else _ = c.sqlite3_bind_null(stmt, 10);
+        _ = c.sqlite3_bind_int64(stmt, 11, now_ms);
+        _ = c.sqlite3_bind_int64(stmt, 12, now_ms);
 
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.InsertFailed;
 
@@ -317,7 +442,7 @@ pub const Store = struct {
     }
 
     pub fn getTask(self: *Self, id: []const u8) !?TaskRow {
-        const stmt = try self.prepare("SELECT id, pipeline_id, stage, title, description, priority, metadata_json, created_at_ms, updated_at_ms FROM tasks WHERE id = ?;");
+        const stmt = try self.prepare("SELECT id, pipeline_id, stage, title, description, priority, metadata_json, task_version, next_eligible_at_ms, max_attempts, retry_delay_ms, dead_letter_stage, dead_letter_reason, created_at_ms, updated_at_ms FROM tasks WHERE id = ?;");
         defer _ = c.sqlite3_finalize(stmt);
         self.bindText(stmt, 1, id);
 
@@ -327,9 +452,9 @@ pub const Store = struct {
 
     pub fn listTasks(self: *Self, stage_filter: ?[]const u8, pipeline_id_filter: ?[]const u8, limit: ?i64) ![]TaskRow {
         // Build query dynamically
-        var sql_buf: [512]u8 = undefined;
+        var sql_buf: [1024]u8 = undefined;
         var sql_len: usize = 0;
-        const base = "SELECT id, pipeline_id, stage, title, description, priority, metadata_json, created_at_ms, updated_at_ms FROM tasks";
+        const base = "SELECT id, pipeline_id, stage, title, description, priority, metadata_json, task_version, next_eligible_at_ms, max_attempts, retry_delay_ms, dead_letter_stage, dead_letter_reason, created_at_ms, updated_at_ms FROM tasks";
         @memcpy(sql_buf[0..base.len], base);
         sql_len = base.len;
 
@@ -391,6 +516,280 @@ pub const Store = struct {
         return self.readRunRow(stmt);
     }
 
+    pub fn addTaskDependency(self: *Self, task_id: []const u8, depends_on_task_id: []const u8) !void {
+        if (std.mem.eql(u8, task_id, depends_on_task_id)) return error.InvalidDependency;
+
+        // Validate both tasks exist.
+        const exists_stmt = try self.prepare("SELECT COUNT(*) FROM tasks WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(exists_stmt);
+        self.bindText(exists_stmt, 1, task_id);
+        if (c.sqlite3_step(exists_stmt) != c.SQLITE_ROW or c.sqlite3_column_int64(exists_stmt, 0) == 0) {
+            return error.TaskNotFound;
+        }
+
+        const exists_dep_stmt = try self.prepare("SELECT COUNT(*) FROM tasks WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(exists_dep_stmt);
+        self.bindText(exists_dep_stmt, 1, depends_on_task_id);
+        if (c.sqlite3_step(exists_dep_stmt) != c.SQLITE_ROW or c.sqlite3_column_int64(exists_dep_stmt, 0) == 0) {
+            return error.DependencyTaskNotFound;
+        }
+
+        const stmt = try self.prepare("INSERT INTO task_dependencies (task_id, depends_on_task_id, created_at_ms) VALUES (?, ?, ?);");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, task_id);
+        self.bindText(stmt, 2, depends_on_task_id);
+        _ = c.sqlite3_bind_int64(stmt, 3, ids.nowMs());
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) {
+            const err_msg = self.lastError();
+            if (std.mem.indexOf(u8, err_msg, "UNIQUE") != null) return error.DuplicateDependency;
+            return error.InsertFailed;
+        }
+    }
+
+    pub fn listTaskDependencies(self: *Self, task_id: []const u8) ![]DependencyRow {
+        const stmt = try self.prepare(
+            "SELECT d.depends_on_task_id, t.stage, p.definition_json FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on_task_id JOIN pipelines p ON p.id = t.pipeline_id WHERE d.task_id = ? ORDER BY d.created_at_ms ASC;",
+        );
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, task_id);
+
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const temp_alloc = scratch.allocator();
+
+        var results: std.ArrayListUnmanaged(DependencyRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            const dep_id = self.colTextView(stmt, 0);
+            const dep_stage = self.colTextView(stmt, 1);
+            const dep_def_json = self.colTextView(stmt, 2);
+            var parsed = domain.parseAndValidate(temp_alloc, dep_def_json) catch return error.InvalidPipeline;
+            defer parsed.deinit();
+            try results.append(self.allocator, .{
+                .depends_on_task_id = try self.allocator.dupe(u8, dep_id),
+                .resolved = domain.isTerminal(parsed.value, dep_stage),
+            });
+        }
+        return results.toOwnedSlice(self.allocator);
+    }
+
+    pub fn assignTask(self: *Self, task_id: []const u8, agent_id: []const u8, assigned_by: ?[]const u8) !void {
+        const now_ms = ids.nowMs();
+
+        const task_stmt = try self.prepare("SELECT COUNT(*) FROM tasks WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(task_stmt);
+        self.bindText(task_stmt, 1, task_id);
+        if (c.sqlite3_step(task_stmt) != c.SQLITE_ROW or c.sqlite3_column_int64(task_stmt, 0) == 0) return error.TaskNotFound;
+
+        // Keep assignment optional but single-active-per-task for deterministic ownership.
+        const deactivate = try self.prepare("UPDATE task_assignments SET active = 0, updated_at_ms = ? WHERE task_id = ?;");
+        defer _ = c.sqlite3_finalize(deactivate);
+        _ = c.sqlite3_bind_int64(deactivate, 1, now_ms);
+        self.bindText(deactivate, 2, task_id);
+        _ = c.sqlite3_step(deactivate);
+
+        const upsert = try self.prepare(
+            "INSERT INTO task_assignments (task_id, agent_id, assigned_by, active, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(task_id, agent_id) DO UPDATE SET assigned_by = excluded.assigned_by, active = 1, updated_at_ms = excluded.updated_at_ms;",
+        );
+        defer _ = c.sqlite3_finalize(upsert);
+        self.bindText(upsert, 1, task_id);
+        self.bindText(upsert, 2, agent_id);
+        if (assigned_by) |value| self.bindText(upsert, 3, value) else _ = c.sqlite3_bind_null(upsert, 3);
+        _ = c.sqlite3_bind_int64(upsert, 4, now_ms);
+        _ = c.sqlite3_bind_int64(upsert, 5, now_ms);
+        if (c.sqlite3_step(upsert) != c.SQLITE_DONE) return error.InsertFailed;
+    }
+
+    pub fn unassignTask(self: *Self, task_id: []const u8, agent_id: []const u8) !bool {
+        const stmt = try self.prepare("UPDATE task_assignments SET active = 0, updated_at_ms = ? WHERE task_id = ? AND agent_id = ? AND active = 1;");
+        defer _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_bind_int64(stmt, 1, ids.nowMs());
+        self.bindText(stmt, 2, task_id);
+        self.bindText(stmt, 3, agent_id);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.UpdateFailed;
+        return c.sqlite3_changes(self.db) > 0;
+    }
+
+    pub fn listTaskAssignments(self: *Self, task_id: []const u8) ![]AssignmentRow {
+        const stmt = try self.prepare("SELECT task_id, agent_id, assigned_by, active, created_at_ms, updated_at_ms FROM task_assignments WHERE task_id = ? ORDER BY created_at_ms ASC;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, task_id);
+
+        var results: std.ArrayListUnmanaged(AssignmentRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try results.append(self.allocator, .{
+                .task_id = self.colText(stmt, 0),
+                .agent_id = self.colText(stmt, 1),
+                .assigned_by = self.colTextNullable(stmt, 2),
+                .active = c.sqlite3_column_int64(stmt, 3) != 0,
+                .created_at_ms = c.sqlite3_column_int64(stmt, 4),
+                .updated_at_ms = c.sqlite3_column_int64(stmt, 5),
+            });
+        }
+        return results.toOwnedSlice(self.allocator);
+    }
+
+    pub fn addGateResult(self: *Self, run_id: []const u8, gate: []const u8, status: []const u8, evidence_json: []const u8, actor: ?[]const u8) !i64 {
+        const run_stmt = try self.prepare("SELECT task_id FROM runs WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(run_stmt);
+        self.bindText(run_stmt, 1, run_id);
+        if (c.sqlite3_step(run_stmt) != c.SQLITE_ROW) return error.RunNotFound;
+        const task_id = self.colTextView(run_stmt, 0);
+
+        const stmt = try self.prepare("INSERT INTO gate_results (run_id, task_id, gate, status, evidence_json, actor, ts_ms) VALUES (?, ?, ?, ?, ?, ?, ?);");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, run_id);
+        self.bindText(stmt, 2, task_id);
+        self.bindText(stmt, 3, gate);
+        self.bindText(stmt, 4, status);
+        self.bindText(stmt, 5, evidence_json);
+        if (actor) |value| self.bindText(stmt, 6, value) else _ = c.sqlite3_bind_null(stmt, 6);
+        _ = c.sqlite3_bind_int64(stmt, 7, ids.nowMs());
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.InsertFailed;
+        return c.sqlite3_last_insert_rowid(self.db);
+    }
+
+    pub fn listGateResults(self: *Self, run_id: []const u8) ![]GateResultRow {
+        const stmt = try self.prepare("SELECT id, run_id, task_id, gate, status, evidence_json, actor, ts_ms FROM gate_results WHERE run_id = ? ORDER BY id ASC;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, run_id);
+
+        var results: std.ArrayListUnmanaged(GateResultRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try results.append(self.allocator, .{
+                .id = c.sqlite3_column_int64(stmt, 0),
+                .run_id = self.colText(stmt, 1),
+                .task_id = self.colText(stmt, 2),
+                .gate = self.colText(stmt, 3),
+                .status = self.colText(stmt, 4),
+                .evidence_json = self.colText(stmt, 5),
+                .actor = self.colTextNullable(stmt, 6),
+                .ts_ms = c.sqlite3_column_int64(stmt, 7),
+            });
+        }
+        return results.toOwnedSlice(self.allocator);
+    }
+
+    pub fn listTasksPage(self: *Self, stage_filter: ?[]const u8, pipeline_id_filter: ?[]const u8, cursor_created_at_ms: ?i64, cursor_id: ?[]const u8, limit: i64) !TaskPage {
+        const page_limit: usize = @intCast(limit);
+        var sql_buf: [1024]u8 = undefined;
+        var sql_len: usize = 0;
+        const base = "SELECT id, pipeline_id, stage, title, description, priority, metadata_json, task_version, next_eligible_at_ms, max_attempts, retry_delay_ms, dead_letter_stage, dead_letter_reason, created_at_ms, updated_at_ms FROM tasks";
+        @memcpy(sql_buf[0..base.len], base);
+        sql_len = base.len;
+
+        var has_where = false;
+        if (stage_filter != null) {
+            const clause = " WHERE stage = ?";
+            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
+            sql_len += clause.len;
+            has_where = true;
+        }
+        if (pipeline_id_filter != null) {
+            const clause = if (has_where) " AND pipeline_id = ?" else " WHERE pipeline_id = ?";
+            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
+            sql_len += clause.len;
+            has_where = true;
+        }
+        if (cursor_created_at_ms != null and cursor_id != null) {
+            const clause = if (has_where) " AND (created_at_ms > ? OR (created_at_ms = ? AND id > ?))" else " WHERE (created_at_ms > ? OR (created_at_ms = ? AND id > ?))";
+            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
+            sql_len += clause.len;
+            has_where = true;
+        }
+
+        const order = " ORDER BY created_at_ms ASC, id ASC LIMIT ?;";
+        @memcpy(sql_buf[sql_len..][0..order.len], order);
+        sql_len += order.len;
+        sql_buf[sql_len] = 0;
+        const sql_z: [*:0]const u8 = @ptrCast(sql_buf[0..sql_len :0]);
+
+        const stmt = try self.prepare(sql_z);
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var bind_idx: c_int = 1;
+        if (stage_filter) |sf| {
+            self.bindText(stmt, bind_idx, sf);
+            bind_idx += 1;
+        }
+        if (pipeline_id_filter) |pf| {
+            self.bindText(stmt, bind_idx, pf);
+            bind_idx += 1;
+        }
+        if (cursor_created_at_ms) |v| {
+            _ = c.sqlite3_bind_int64(stmt, bind_idx, v);
+            bind_idx += 1;
+            _ = c.sqlite3_bind_int64(stmt, bind_idx, v);
+            bind_idx += 1;
+            self.bindText(stmt, bind_idx, cursor_id.?);
+            bind_idx += 1;
+        }
+        _ = c.sqlite3_bind_int64(stmt, bind_idx, limit + 1);
+
+        var rows: std.ArrayListUnmanaged(TaskRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try rows.append(self.allocator, self.readTaskRow(stmt));
+        }
+
+        var next_cursor: ?[]const u8 = null;
+        if (rows.items.len > page_limit) {
+            const cursor_row = rows.items[page_limit];
+            next_cursor = try std.fmt.allocPrint(self.allocator, "{d}:{s}", .{ cursor_row.created_at_ms, cursor_row.id });
+            self.freeTaskRow(cursor_row);
+            _ = rows.orderedRemove(page_limit);
+        }
+
+        return .{
+            .items = try rows.toOwnedSlice(self.allocator),
+            .next_cursor = next_cursor,
+        };
+    }
+
+    pub fn listEventsPage(self: *Self, run_id: []const u8, cursor_id: ?i64, limit: i64) !EventPage {
+        const page_limit: usize = @intCast(limit);
+        const sql = if (cursor_id != null)
+            "SELECT id, run_id, ts_ms, kind, data_json FROM events WHERE run_id = ? AND id > ? ORDER BY id ASC LIMIT ?;"
+        else
+            "SELECT id, run_id, ts_ms, kind, data_json FROM events WHERE run_id = ? ORDER BY id ASC LIMIT ?;";
+
+        const stmt = try self.prepare(sql);
+        defer _ = c.sqlite3_finalize(stmt);
+        var bind_idx: c_int = 1;
+        self.bindText(stmt, bind_idx, run_id);
+        bind_idx += 1;
+        if (cursor_id) |v| {
+            _ = c.sqlite3_bind_int64(stmt, bind_idx, v);
+            bind_idx += 1;
+        }
+        _ = c.sqlite3_bind_int64(stmt, bind_idx, limit + 1);
+
+        var rows: std.ArrayListUnmanaged(EventRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try rows.append(self.allocator, .{
+                .id = c.sqlite3_column_int64(stmt, 0),
+                .run_id = self.colText(stmt, 1),
+                .ts_ms = c.sqlite3_column_int64(stmt, 2),
+                .kind = self.colText(stmt, 3),
+                .data_json = self.colText(stmt, 4),
+            });
+        }
+
+        var next_cursor: ?[]const u8 = null;
+        if (rows.items.len > page_limit) {
+            const cursor_row = rows.items[page_limit];
+            next_cursor = try std.fmt.allocPrint(self.allocator, "{d}", .{cursor_row.id});
+            self.allocator.free(cursor_row.run_id);
+            self.allocator.free(cursor_row.kind);
+            self.allocator.free(cursor_row.data_json);
+            _ = rows.orderedRemove(page_limit);
+        }
+
+        return .{
+            .items = try rows.toOwnedSlice(self.allocator),
+            .next_cursor = next_cursor,
+        };
+    }
+
     fn readTaskRow(self: *Self, stmt: *c.sqlite3_stmt) TaskRow {
         return .{
             .id = self.colText(stmt, 0),
@@ -400,8 +799,14 @@ pub const Store = struct {
             .description = self.colText(stmt, 4),
             .priority = c.sqlite3_column_int64(stmt, 5),
             .metadata_json = self.colText(stmt, 6),
-            .created_at_ms = c.sqlite3_column_int64(stmt, 7),
-            .updated_at_ms = c.sqlite3_column_int64(stmt, 8),
+            .task_version = c.sqlite3_column_int64(stmt, 7),
+            .next_eligible_at_ms = c.sqlite3_column_int64(stmt, 8),
+            .max_attempts = self.colInt64Nullable(stmt, 9),
+            .retry_delay_ms = c.sqlite3_column_int64(stmt, 10),
+            .dead_letter_stage = self.colTextNullable(stmt, 11),
+            .dead_letter_reason = self.colTextNullable(stmt, 12),
+            .created_at_ms = c.sqlite3_column_int64(stmt, 13),
+            .updated_at_ms = c.sqlite3_column_int64(stmt, 14),
         };
     }
 
@@ -484,16 +889,20 @@ pub const Store = struct {
         // Find task: stage matches, no active lease, ordered by priority
         var task_row: ?TaskRow = null;
         for (all_stages.items) |stage| {
-            const find_sql = "SELECT t.id, t.pipeline_id, t.stage, t.title, t.description, t.priority, t.metadata_json, t.created_at_ms, t.updated_at_ms FROM tasks t WHERE t.stage = ? AND NOT EXISTS (SELECT 1 FROM leases l JOIN runs r ON l.run_id = r.id WHERE r.task_id = t.id AND l.expires_at_ms > ?) ORDER BY t.priority DESC, t.created_at_ms ASC LIMIT 1;";
+            const find_sql = "SELECT t.id, t.pipeline_id, t.stage, t.title, t.description, t.priority, t.metadata_json, t.task_version, t.next_eligible_at_ms, t.max_attempts, t.retry_delay_ms, t.dead_letter_stage, t.dead_letter_reason, t.created_at_ms, t.updated_at_ms FROM tasks t WHERE t.stage = ? AND t.dead_letter_reason IS NULL AND t.next_eligible_at_ms <= ? AND NOT EXISTS (SELECT 1 FROM leases l JOIN runs r ON l.run_id = r.id WHERE r.task_id = t.id AND l.expires_at_ms > ?) ORDER BY t.priority DESC, t.created_at_ms ASC LIMIT 20;";
             const fstmt = try self.prepare(find_sql);
             defer _ = c.sqlite3_finalize(fstmt);
             self.bindText(fstmt, 1, stage);
             _ = c.sqlite3_bind_int64(fstmt, 2, now_ms);
+            _ = c.sqlite3_bind_int64(fstmt, 3, now_ms);
 
-            if (c.sqlite3_step(fstmt) == c.SQLITE_ROW) {
+            while (c.sqlite3_step(fstmt) == c.SQLITE_ROW) {
                 const candidate = try self.readTaskRowAlloc(temp_alloc, fstmt);
+                if (!(try self.isTaskDependenciesSatisfied(candidate.id)) or !(try self.isTaskAssignableToAgent(candidate.id, agent_id))) {
+                    continue;
+                }
+
                 if (task_row) |existing| {
-                    // Keep higher priority or earlier created
                     if (candidate.priority > existing.priority or
                         (candidate.priority == existing.priority and candidate.created_at_ms < existing.created_at_ms))
                     {
@@ -620,6 +1029,43 @@ pub const Store = struct {
         return new_expires;
     }
 
+    fn isTaskDependenciesSatisfied(self: *Self, task_id: []const u8) !bool {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const temp_alloc = scratch.allocator();
+
+        const stmt = try self.prepare(
+            "SELECT t.stage, p.definition_json FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on_task_id JOIN pipelines p ON p.id = t.pipeline_id WHERE d.task_id = ?;",
+        );
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, task_id);
+
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            const dep_stage = self.colTextView(stmt, 0);
+            const def_json = self.colTextView(stmt, 1);
+            var parsed = domain.parseAndValidate(temp_alloc, def_json) catch return false;
+            defer parsed.deinit();
+            if (!domain.isTerminal(parsed.value, dep_stage)) return false;
+        }
+
+        return true;
+    }
+
+    fn isTaskAssignableToAgent(self: *Self, task_id: []const u8, agent_id: []const u8) !bool {
+        const stmt = try self.prepare("SELECT agent_id FROM task_assignments WHERE task_id = ? AND active = 1;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, task_id);
+
+        var has_active_assignment = false;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            has_active_assignment = true;
+            const assigned_agent = self.colTextView(stmt, 0);
+            if (std.mem.eql(u8, assigned_agent, agent_id)) return true;
+        }
+
+        return !has_active_assignment;
+    }
+
     pub fn validateLeaseByRunId(self: *Self, run_id: []const u8, token_hex: []const u8) !void {
         var token_bytes: [32]u8 = undefined;
         _ = std.fmt.hexToBytes(&token_bytes, token_hex) catch return error.InvalidToken;
@@ -640,6 +1086,21 @@ pub const Store = struct {
 
         const expires = c.sqlite3_column_int64(stmt, 1);
         if (expires <= ids.nowMs()) return error.LeaseExpired;
+    }
+
+    fn areRequiredGatesPassed(self: *Self, run_id: []const u8, required_gates: []const []const u8) !bool {
+        for (required_gates) |gate| {
+            const stmt = try self.prepare("SELECT status FROM gate_results WHERE run_id = ? AND gate = ? ORDER BY id DESC LIMIT 1;");
+            defer _ = c.sqlite3_finalize(stmt);
+            self.bindText(stmt, 1, run_id);
+            self.bindText(stmt, 2, gate);
+
+            if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return false;
+            const status = self.colTextView(stmt, 0);
+            if (!std.mem.eql(u8, status, "pass")) return false;
+        }
+
+        return true;
     }
 
     // ===== Events =====
@@ -676,7 +1137,15 @@ pub const Store = struct {
 
     // ===== Transition =====
 
-    pub fn transitionRun(self: *Self, run_id: []const u8, trigger: []const u8, instructions: ?[]const u8, usage_json: ?[]const u8) !TransitionResult {
+    pub fn transitionRun(
+        self: *Self,
+        run_id: []const u8,
+        trigger: []const u8,
+        instructions: ?[]const u8,
+        usage_json: ?[]const u8,
+        expected_stage: ?[]const u8,
+        expected_task_version: ?i64,
+    ) !TransitionResult {
         try self.execSimple("BEGIN IMMEDIATE;");
         errdefer self.execSimple("ROLLBACK;") catch {};
 
@@ -695,12 +1164,20 @@ pub const Store = struct {
         if (!std.mem.eql(u8, run_status, "running")) return error.RunNotRunning;
 
         // Load task
-        const task_stmt = try self.prepare("SELECT pipeline_id, stage FROM tasks WHERE id = ?;");
+        const task_stmt = try self.prepare("SELECT pipeline_id, stage, task_version FROM tasks WHERE id = ?;");
         defer _ = c.sqlite3_finalize(task_stmt);
         self.bindText(task_stmt, 1, task_id);
         if (c.sqlite3_step(task_stmt) != c.SQLITE_ROW) return error.TaskNotFound;
         const pipeline_id = try temp_alloc.dupe(u8, self.colTextView(task_stmt, 0));
         const current_stage = try temp_alloc.dupe(u8, self.colTextView(task_stmt, 1));
+        const current_task_version = c.sqlite3_column_int64(task_stmt, 2);
+
+        if (expected_stage) |value| {
+            if (!std.mem.eql(u8, value, current_stage)) return error.ExpectedStageMismatch;
+        }
+        if (expected_task_version) |value| {
+            if (value != current_task_version) return error.TaskVersionMismatch;
+        }
 
         // Load pipeline
         const pip_stmt = try self.prepare("SELECT definition_json FROM pipelines WHERE id = ?;");
@@ -712,6 +1189,11 @@ pub const Store = struct {
         var parsed = domain.parseAndValidate(temp_alloc, def_json) catch return error.InvalidPipeline;
         defer parsed.deinit();
         const transition = domain.findTransition(parsed.value, current_stage, trigger) orelse return error.InvalidTransition;
+
+        if (transition.required_gates) |required_gates| {
+            const gates_ok = try self.areRequiredGatesPassed(run_id, required_gates);
+            if (!gates_ok) return error.RequiredGatesNotPassed;
+        }
 
         // Update run
         {
@@ -725,7 +1207,7 @@ pub const Store = struct {
 
         // Update task stage
         {
-            const upd = try self.prepare("UPDATE tasks SET stage = ?, updated_at_ms = ? WHERE id = ?;");
+            const upd = try self.prepare("UPDATE tasks SET stage = ?, task_version = task_version + 1, dead_letter_reason = NULL, next_eligible_at_ms = 0, updated_at_ms = ? WHERE id = ?;");
             defer _ = c.sqlite3_finalize(upd);
             self.bindText(upd, 1, transition.to);
             _ = c.sqlite3_bind_int64(upd, 2, now_ms);
@@ -804,27 +1286,98 @@ pub const Store = struct {
             _ = c.sqlite3_step(del);
         }
 
-        // Count failed attempts at this stage
+        // Retry policy and dead-letter handling
         {
-            const task_stmt = try self.prepare("SELECT stage FROM tasks WHERE id = ?;");
+            const task_stmt = try self.prepare("SELECT pipeline_id, stage, max_attempts, retry_delay_ms, dead_letter_stage FROM tasks WHERE id = ?;");
             defer _ = c.sqlite3_finalize(task_stmt);
             self.bindText(task_stmt, 1, task_id);
-            if (c.sqlite3_step(task_stmt) == c.SQLITE_ROW) {
-                // Count failed runs for this task (at any stage, simplified)
-                const cnt_stmt = try self.prepare("SELECT COUNT(*) FROM runs WHERE task_id = ? AND status = 'failed';");
-                defer _ = c.sqlite3_finalize(cnt_stmt);
-                self.bindText(cnt_stmt, 1, task_id);
-                if (c.sqlite3_step(cnt_stmt) == c.SQLITE_ROW) {
-                    const fail_count = c.sqlite3_column_int64(cnt_stmt, 0);
-                    if (fail_count >= 3) {
-                        // Insert exhaustion event
-                        const evt = try self.prepare("INSERT INTO events (run_id, ts_ms, kind, data_json) VALUES (?, ?, 'exhaustion', '{\"message\":\"Max retries exceeded\"}');");
-                        defer _ = c.sqlite3_finalize(evt);
-                        self.bindText(evt, 1, run_id);
-                        _ = c.sqlite3_bind_int64(evt, 2, now_ms);
-                        _ = c.sqlite3_step(evt);
+            if (c.sqlite3_step(task_stmt) != c.SQLITE_ROW) return error.TaskNotFound;
+
+            const pipeline_id = try temp_alloc.dupe(u8, self.colTextView(task_stmt, 0));
+            const current_stage = try temp_alloc.dupe(u8, self.colTextView(task_stmt, 1));
+            const max_attempts = self.colInt64Nullable(task_stmt, 2);
+            const retry_delay_ms = c.sqlite3_column_int64(task_stmt, 3);
+            const dead_letter_stage = if (c.sqlite3_column_type(task_stmt, 4) == c.SQLITE_NULL) null else try temp_alloc.dupe(u8, self.colTextView(task_stmt, 4));
+
+            const cnt_stmt = try self.prepare("SELECT COUNT(*) FROM runs WHERE task_id = ? AND status = 'failed';");
+            defer _ = c.sqlite3_finalize(cnt_stmt);
+            self.bindText(cnt_stmt, 1, task_id);
+            var fail_count: i64 = 0;
+            if (c.sqlite3_step(cnt_stmt) == c.SQLITE_ROW) {
+                fail_count = c.sqlite3_column_int64(cnt_stmt, 0);
+            }
+
+            const exhausted = if (max_attempts) |limit| fail_count >= limit else false;
+            if (exhausted) {
+                var dead_stage_to_use: ?[]const u8 = null;
+                if (dead_letter_stage) |candidate| {
+                    const pip_stmt = try self.prepare("SELECT definition_json FROM pipelines WHERE id = ?;");
+                    defer _ = c.sqlite3_finalize(pip_stmt);
+                    self.bindText(pip_stmt, 1, pipeline_id);
+                    if (c.sqlite3_step(pip_stmt) == c.SQLITE_ROW) {
+                        const def_json = self.colTextView(pip_stmt, 0);
+                        const parsed = domain.parseAndValidate(temp_alloc, def_json) catch null;
+                        if (parsed) |parsed_value| {
+                            var p = parsed_value;
+                            defer p.deinit();
+                            if (p.value.states.map.contains(candidate)) {
+                                dead_stage_to_use = candidate;
+                            }
+                        }
                     }
                 }
+
+                const impossible_retry_ts: i64 = 9_223_372_036_854_775_000;
+                if (dead_stage_to_use) |stage| {
+                    const upd = try self.prepare("UPDATE tasks SET stage = ?, task_version = task_version + 1, dead_letter_reason = 'max_attempts_exceeded', next_eligible_at_ms = ?, updated_at_ms = ? WHERE id = ?;");
+                    defer _ = c.sqlite3_finalize(upd);
+                    self.bindText(upd, 1, stage);
+                    _ = c.sqlite3_bind_int64(upd, 2, impossible_retry_ts);
+                    _ = c.sqlite3_bind_int64(upd, 3, now_ms);
+                    self.bindText(upd, 4, task_id);
+                    _ = c.sqlite3_step(upd);
+                } else {
+                    const upd = try self.prepare("UPDATE tasks SET dead_letter_reason = 'max_attempts_exceeded', next_eligible_at_ms = ?, updated_at_ms = ? WHERE id = ?;");
+                    defer _ = c.sqlite3_finalize(upd);
+                    _ = c.sqlite3_bind_int64(upd, 1, impossible_retry_ts);
+                    _ = c.sqlite3_bind_int64(upd, 2, now_ms);
+                    self.bindText(upd, 3, task_id);
+                    _ = c.sqlite3_step(upd);
+                }
+
+                const evt_data = std.json.Stringify.valueAlloc(temp_alloc, .{
+                    .reason = "max_attempts_exceeded",
+                    .failed_attempts = fail_count,
+                    .from_stage = current_stage,
+                    .dead_letter_stage = dead_stage_to_use,
+                }, .{}) catch return error.InsertFailed;
+                const evt = try self.prepare("INSERT INTO events (run_id, ts_ms, kind, data_json) VALUES (?, ?, 'dead_letter', ?);");
+                defer _ = c.sqlite3_finalize(evt);
+                self.bindText(evt, 1, run_id);
+                _ = c.sqlite3_bind_int64(evt, 2, now_ms);
+                self.bindText(evt, 3, evt_data);
+                _ = c.sqlite3_step(evt);
+            } else {
+                const next_eligible_at_ms = now_ms + retry_delay_ms;
+                const upd = try self.prepare("UPDATE tasks SET next_eligible_at_ms = ?, updated_at_ms = ? WHERE id = ?;");
+                defer _ = c.sqlite3_finalize(upd);
+                _ = c.sqlite3_bind_int64(upd, 1, next_eligible_at_ms);
+                _ = c.sqlite3_bind_int64(upd, 2, now_ms);
+                self.bindText(upd, 3, task_id);
+                _ = c.sqlite3_step(upd);
+
+                const evt_data = std.json.Stringify.valueAlloc(temp_alloc, .{
+                    .reason = "retry_scheduled",
+                    .failed_attempts = fail_count,
+                    .retry_delay_ms = retry_delay_ms,
+                    .next_eligible_at_ms = next_eligible_at_ms,
+                }, .{}) catch return error.InsertFailed;
+                const evt = try self.prepare("INSERT INTO events (run_id, ts_ms, kind, data_json) VALUES (?, ?, 'retry_scheduled', ?);");
+                defer _ = c.sqlite3_finalize(evt);
+                self.bindText(evt, 1, run_id);
+                _ = c.sqlite3_bind_int64(evt, 2, now_ms);
+                self.bindText(evt, 3, evt_data);
+                _ = c.sqlite3_step(evt);
             }
         }
 
@@ -853,6 +1406,8 @@ pub const Store = struct {
         self.allocator.free(row.title);
         self.allocator.free(row.description);
         self.allocator.free(row.metadata_json);
+        if (row.dead_letter_stage) |stage| self.allocator.free(stage);
+        if (row.dead_letter_reason) |reason| self.allocator.free(reason);
     }
 
     pub fn freeTaskRows(self: *Self, rows: []TaskRow) void {
@@ -903,6 +1458,58 @@ pub const Store = struct {
             self.allocator.free(row.meta_json);
         }
         self.allocator.free(rows);
+    }
+
+    pub fn freeDependencyRows(self: *Self, rows: []DependencyRow) void {
+        for (rows) |row| {
+            self.allocator.free(row.depends_on_task_id);
+        }
+        self.allocator.free(rows);
+    }
+
+    pub fn freeGateResultRows(self: *Self, rows: []GateResultRow) void {
+        for (rows) |row| {
+            self.allocator.free(row.run_id);
+            self.allocator.free(row.task_id);
+            self.allocator.free(row.gate);
+            self.allocator.free(row.status);
+            self.allocator.free(row.evidence_json);
+            if (row.actor) |actor| self.allocator.free(actor);
+        }
+        self.allocator.free(rows);
+    }
+
+    pub fn freeAssignmentRows(self: *Self, rows: []AssignmentRow) void {
+        for (rows) |row| {
+            self.allocator.free(row.task_id);
+            self.allocator.free(row.agent_id);
+            if (row.assigned_by) |assigned_by| self.allocator.free(assigned_by);
+        }
+        self.allocator.free(rows);
+    }
+
+    pub fn freeTaskPage(self: *Self, page: TaskPage) void {
+        self.freeTaskRows(page.items);
+        if (page.next_cursor) |cursor| self.allocator.free(cursor);
+    }
+
+    pub fn freeEventPage(self: *Self, page: EventPage) void {
+        self.freeEventRows(page.items);
+        if (page.next_cursor) |cursor| self.allocator.free(cursor);
+    }
+
+    pub fn freeArtifactPage(self: *Self, page: ArtifactPage) void {
+        self.freeArtifactRows(page.items);
+        if (page.next_cursor) |cursor| self.allocator.free(cursor);
+    }
+
+    pub fn freeQueueRoleStats(self: *Self, rows: []QueueRoleStats) void {
+        for (rows) |row| self.allocator.free(row.role);
+        self.allocator.free(rows);
+    }
+
+    pub fn freeIdempotencyRow(self: *Self, row: IdempotencyRow) void {
+        self.allocator.free(row.response_body);
     }
 
     // ===== OpenTelemetry =====
@@ -989,7 +1596,7 @@ pub const Store = struct {
     }
 
     pub fn listArtifacts(self: *Self, task_id: ?[]const u8, run_id: ?[]const u8) ![]ArtifactRow {
-        var sql_buf: [256]u8 = undefined;
+        var sql_buf: [512]u8 = undefined;
         var sql_len: usize = 0;
         const base = "SELECT id, task_id, run_id, created_at_ms, kind, uri, sha256_hex, size_bytes, meta_json FROM artifacts";
         @memcpy(sql_buf[0..base.len], base);
@@ -1042,6 +1649,227 @@ pub const Store = struct {
             });
         }
         return results.toOwnedSlice(self.allocator);
+    }
+
+    pub fn listArtifactsPage(self: *Self, task_id: ?[]const u8, run_id: ?[]const u8, cursor_created_at_ms: ?i64, cursor_id: ?[]const u8, limit: i64) !ArtifactPage {
+        const page_limit: usize = @intCast(limit);
+        var sql_buf: [768]u8 = undefined;
+        var sql_len: usize = 0;
+        const base = "SELECT id, task_id, run_id, created_at_ms, kind, uri, sha256_hex, size_bytes, meta_json FROM artifacts";
+        @memcpy(sql_buf[0..base.len], base);
+        sql_len = base.len;
+
+        var has_where = false;
+        if (task_id != null) {
+            const clause = " WHERE task_id = ?";
+            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
+            sql_len += clause.len;
+            has_where = true;
+        }
+        if (run_id != null) {
+            const clause = if (has_where) " AND run_id = ?" else " WHERE run_id = ?";
+            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
+            sql_len += clause.len;
+            has_where = true;
+        }
+        if (cursor_created_at_ms != null and cursor_id != null) {
+            const clause = if (has_where) " AND (created_at_ms > ? OR (created_at_ms = ? AND id > ?))" else " WHERE (created_at_ms > ? OR (created_at_ms = ? AND id > ?))";
+            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
+            sql_len += clause.len;
+            has_where = true;
+        }
+
+        const order = " ORDER BY created_at_ms ASC, id ASC LIMIT ?;";
+        @memcpy(sql_buf[sql_len..][0..order.len], order);
+        sql_len += order.len;
+        sql_buf[sql_len] = 0;
+        const sql_z: [*:0]const u8 = @ptrCast(sql_buf[0..sql_len :0]);
+
+        const stmt = try self.prepare(sql_z);
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var bind_idx: c_int = 1;
+        if (task_id) |tid| {
+            self.bindText(stmt, bind_idx, tid);
+            bind_idx += 1;
+        }
+        if (run_id) |rid| {
+            self.bindText(stmt, bind_idx, rid);
+            bind_idx += 1;
+        }
+        if (cursor_created_at_ms) |v| {
+            _ = c.sqlite3_bind_int64(stmt, bind_idx, v);
+            bind_idx += 1;
+            _ = c.sqlite3_bind_int64(stmt, bind_idx, v);
+            bind_idx += 1;
+            self.bindText(stmt, bind_idx, cursor_id.?);
+            bind_idx += 1;
+        }
+        _ = c.sqlite3_bind_int64(stmt, bind_idx, limit + 1);
+
+        var rows: std.ArrayListUnmanaged(ArtifactRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try rows.append(self.allocator, .{
+                .id = self.colText(stmt, 0),
+                .task_id = self.colTextNullable(stmt, 1),
+                .run_id = self.colTextNullable(stmt, 2),
+                .created_at_ms = c.sqlite3_column_int64(stmt, 3),
+                .kind = self.colText(stmt, 4),
+                .uri = self.colText(stmt, 5),
+                .sha256_hex = self.colTextNullable(stmt, 6),
+                .size_bytes = self.colInt64Nullable(stmt, 7),
+                .meta_json = self.colText(stmt, 8),
+            });
+        }
+
+        var next_cursor: ?[]const u8 = null;
+        if (rows.items.len > page_limit) {
+            const cursor_row = rows.items[page_limit];
+            next_cursor = try std.fmt.allocPrint(self.allocator, "{d}:{s}", .{ cursor_row.created_at_ms, cursor_row.id });
+            self.allocator.free(cursor_row.id);
+            if (cursor_row.task_id) |v| self.allocator.free(v);
+            if (cursor_row.run_id) |v| self.allocator.free(v);
+            self.allocator.free(cursor_row.kind);
+            self.allocator.free(cursor_row.uri);
+            if (cursor_row.sha256_hex) |v| self.allocator.free(v);
+            self.allocator.free(cursor_row.meta_json);
+            _ = rows.orderedRemove(page_limit);
+        }
+
+        return .{
+            .items = try rows.toOwnedSlice(self.allocator),
+            .next_cursor = next_cursor,
+        };
+    }
+
+    fn ensureRoleStatsIndex(self: *Self, roles: *std.ArrayListUnmanaged(QueueRoleStats), role: []const u8) !usize {
+        for (roles.items, 0..) |row, i| {
+            if (std.mem.eql(u8, row.role, role)) return i;
+        }
+        try roles.append(self.allocator, .{
+            .role = try self.allocator.dupe(u8, role),
+            .claimable_count = 0,
+            .oldest_claimable_age_ms = null,
+            .failed_count = 0,
+            .stuck_count = 0,
+            .near_expiry_leases = 0,
+        });
+        return roles.items.len - 1;
+    }
+
+    pub fn getIdempotency(self: *Self, key: []const u8, method: []const u8, path: []const u8) !?IdempotencyRow {
+        const stmt = try self.prepare("SELECT request_hash, response_status, response_body, created_at_ms FROM idempotency_keys WHERE key = ? AND method = ? AND path = ?;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, key);
+        self.bindText(stmt, 2, method);
+        self.bindText(stmt, 3, path);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+
+        const hash_ptr = c.sqlite3_column_blob(stmt, 0);
+        const hash_len = c.sqlite3_column_bytes(stmt, 0);
+        if (hash_ptr == null or hash_len != 32) return error.InvalidHashLength;
+        var request_hash: [32]u8 = undefined;
+        @memcpy(request_hash[0..], @as([*]const u8, @ptrCast(hash_ptr.?))[0..32]);
+
+        return .{
+            .request_hash = request_hash,
+            .response_status = c.sqlite3_column_int64(stmt, 1),
+            .response_body = self.colText(stmt, 2),
+            .created_at_ms = c.sqlite3_column_int64(stmt, 3),
+        };
+    }
+
+    pub fn putIdempotency(self: *Self, key: []const u8, method: []const u8, path: []const u8, request_hash: [32]u8, response_status: i64, response_body: []const u8) !void {
+        const stmt = try self.prepare(
+            "INSERT INTO idempotency_keys (key, method, path, request_hash, response_status, response_body, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(key, method, path) DO UPDATE SET request_hash = excluded.request_hash, response_status = excluded.response_status, response_body = excluded.response_body, created_at_ms = excluded.created_at_ms;",
+        );
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, key);
+        self.bindText(stmt, 2, method);
+        self.bindText(stmt, 3, path);
+        _ = c.sqlite3_bind_blob(stmt, 4, &request_hash, @intCast(request_hash.len), SQLITE_STATIC);
+        _ = c.sqlite3_bind_int64(stmt, 5, response_status);
+        self.bindText(stmt, 6, response_body);
+        _ = c.sqlite3_bind_int64(stmt, 7, ids.nowMs());
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.InsertFailed;
+    }
+
+    pub fn getQueueRoleStats(self: *Self, near_expiry_window_ms: i64, stuck_window_ms: i64) ![]QueueRoleStats {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const temp_alloc = scratch.allocator();
+
+        var roles: std.ArrayListUnmanaged(QueueRoleStats) = .empty;
+        const now_ms = ids.nowMs();
+
+        const pipelines_stmt = try self.prepare("SELECT id, definition_json FROM pipelines;");
+        defer _ = c.sqlite3_finalize(pipelines_stmt);
+        while (c.sqlite3_step(pipelines_stmt) == c.SQLITE_ROW) {
+            const pipeline_id = self.colTextView(pipelines_stmt, 0);
+            const definition_json = self.colTextView(pipelines_stmt, 1);
+            var parsed = domain.parseAndValidate(temp_alloc, definition_json) catch continue;
+            defer parsed.deinit();
+
+            var states_it = parsed.value.states.map.iterator();
+            while (states_it.next()) |entry| {
+                const role = entry.value_ptr.agent_role orelse continue;
+                const stage = entry.key_ptr.*;
+                const idx = try self.ensureRoleStatsIndex(&roles, role);
+
+                const claimable_stmt = try self.prepare(
+                    "SELECT t.id, t.created_at_ms FROM tasks t WHERE t.pipeline_id = ? AND t.stage = ? AND t.dead_letter_reason IS NULL AND t.next_eligible_at_ms <= ? AND NOT EXISTS (SELECT 1 FROM leases l JOIN runs r ON l.run_id = r.id WHERE r.task_id = t.id AND l.expires_at_ms > ?) ORDER BY t.created_at_ms ASC;",
+                );
+                defer _ = c.sqlite3_finalize(claimable_stmt);
+                self.bindText(claimable_stmt, 1, pipeline_id);
+                self.bindText(claimable_stmt, 2, stage);
+                _ = c.sqlite3_bind_int64(claimable_stmt, 3, now_ms);
+                _ = c.sqlite3_bind_int64(claimable_stmt, 4, now_ms);
+                while (c.sqlite3_step(claimable_stmt) == c.SQLITE_ROW) {
+                    const task_id = self.colTextView(claimable_stmt, 0);
+                    const created_at_ms = c.sqlite3_column_int64(claimable_stmt, 1);
+                    if (!(try self.isTaskDependenciesSatisfied(task_id))) continue;
+                    roles.items[idx].claimable_count += 1;
+                    const age = now_ms - created_at_ms;
+                    if (roles.items[idx].oldest_claimable_age_ms == null or age > roles.items[idx].oldest_claimable_age_ms.?) {
+                        roles.items[idx].oldest_claimable_age_ms = age;
+                    }
+                }
+
+                const failed_stmt = try self.prepare("SELECT COUNT(*) FROM runs r JOIN tasks t ON t.id = r.task_id WHERE t.pipeline_id = ? AND t.stage = ? AND r.status = 'failed';");
+                defer _ = c.sqlite3_finalize(failed_stmt);
+                self.bindText(failed_stmt, 1, pipeline_id);
+                self.bindText(failed_stmt, 2, stage);
+                if (c.sqlite3_step(failed_stmt) == c.SQLITE_ROW) {
+                    roles.items[idx].failed_count += c.sqlite3_column_int64(failed_stmt, 0);
+                }
+
+                const stuck_stmt = try self.prepare(
+                    "SELECT COUNT(*) FROM runs r JOIN tasks t ON t.id = r.task_id WHERE t.pipeline_id = ? AND t.stage = ? AND r.status = 'running' AND r.started_at_ms <= ?;",
+                );
+                defer _ = c.sqlite3_finalize(stuck_stmt);
+                self.bindText(stuck_stmt, 1, pipeline_id);
+                self.bindText(stuck_stmt, 2, stage);
+                _ = c.sqlite3_bind_int64(stuck_stmt, 3, now_ms - stuck_window_ms);
+                if (c.sqlite3_step(stuck_stmt) == c.SQLITE_ROW) {
+                    roles.items[idx].stuck_count += c.sqlite3_column_int64(stuck_stmt, 0);
+                }
+
+                const lease_stmt = try self.prepare(
+                    "SELECT COUNT(*) FROM leases l JOIN runs r ON r.id = l.run_id JOIN tasks t ON t.id = r.task_id WHERE t.pipeline_id = ? AND t.stage = ? AND l.expires_at_ms > ? AND l.expires_at_ms <= ?;",
+                );
+                defer _ = c.sqlite3_finalize(lease_stmt);
+                self.bindText(lease_stmt, 1, pipeline_id);
+                self.bindText(lease_stmt, 2, stage);
+                _ = c.sqlite3_bind_int64(lease_stmt, 3, now_ms);
+                _ = c.sqlite3_bind_int64(lease_stmt, 4, now_ms + near_expiry_window_ms);
+                if (c.sqlite3_step(lease_stmt) == c.SQLITE_ROW) {
+                    roles.items[idx].near_expiry_leases += c.sqlite3_column_int64(lease_stmt, 0);
+                }
+            }
+        }
+
+        return roles.toOwnedSlice(self.allocator);
     }
 
     // ===== Helpers =====
@@ -1116,8 +1944,14 @@ pub const Store = struct {
             .description = try allocator.dupe(u8, self.colTextView(stmt, 4)),
             .priority = c.sqlite3_column_int64(stmt, 5),
             .metadata_json = try allocator.dupe(u8, self.colTextView(stmt, 6)),
-            .created_at_ms = c.sqlite3_column_int64(stmt, 7),
-            .updated_at_ms = c.sqlite3_column_int64(stmt, 8),
+            .task_version = c.sqlite3_column_int64(stmt, 7),
+            .next_eligible_at_ms = c.sqlite3_column_int64(stmt, 8),
+            .max_attempts = self.colInt64Nullable(stmt, 9),
+            .retry_delay_ms = c.sqlite3_column_int64(stmt, 10),
+            .dead_letter_stage = if (c.sqlite3_column_type(stmt, 11) == c.SQLITE_NULL) null else try allocator.dupe(u8, self.colTextView(stmt, 11)),
+            .dead_letter_reason = if (c.sqlite3_column_type(stmt, 12) == c.SQLITE_NULL) null else try allocator.dupe(u8, self.colTextView(stmt, 12)),
+            .created_at_ms = c.sqlite3_column_int64(stmt, 13),
+            .updated_at_ms = c.sqlite3_column_int64(stmt, 14),
         };
     }
 
@@ -1130,6 +1964,12 @@ pub const Store = struct {
             .description = try self.allocator.dupe(u8, row.description),
             .priority = row.priority,
             .metadata_json = try self.allocator.dupe(u8, row.metadata_json),
+            .task_version = row.task_version,
+            .next_eligible_at_ms = row.next_eligible_at_ms,
+            .max_attempts = row.max_attempts,
+            .retry_delay_ms = row.retry_delay_ms,
+            .dead_letter_stage = if (row.dead_letter_stage) |v| try self.allocator.dupe(u8, v) else null,
+            .dead_letter_reason = if (row.dead_letter_reason) |v| try self.allocator.dupe(u8, v) else null,
             .created_at_ms = row.created_at_ms,
             .updated_at_ms = row.updated_at_ms,
         };

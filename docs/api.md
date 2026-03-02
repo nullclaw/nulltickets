@@ -4,177 +4,121 @@
 
 - Content type: `application/json`
 - Time values: Unix milliseconds
-- Auth: `Authorization: Bearer <lease_token>` for lease-protected endpoints
+- Idempotency for writes: optional `Idempotency-Key` header
+- Lease-protected endpoints: `Authorization: Bearer <lease_token>`
 
 ## Discovery
 
-### `GET /openapi.json`
-
-Returns the full OpenAPI 3.1 document for machine-readable integration.
-
-### `GET /.well-known/openapi.json`
-
-Same document at a well-known discovery path.
+- `GET /openapi.json`
+- `GET /.well-known/openapi.json`
 
 ## OpenTelemetry
 
-### `POST /v1/traces`
+- `POST /v1/traces`
+- `POST /otlp/v1/traces`
 
-Ingests OpenTelemetry OTLP traces.
-
-- `Content-Type: application/json`: parsed as OTLP `ExportTraceServiceRequest`.
-- Any other content type (for example `application/x-protobuf`): raw payload is stored as blob.
-
-Response:
-
-```json
-{
-  "batch_id": 1,
-  "accepted_spans": 3,
-  "stored": "json"
-}
-```
-
-### `POST /otlp/v1/traces`
-
-Same OTLP ingest behavior at a collector-compatible path.
-
-### OTLP Attribute Mapping
-
-If present in span or resource attributes, these keys are mapped to tracker entities:
+OTLP attribute mapping keys:
 
 - `nulltickets.run_id`
 - `nulltickets.task_id`
 
 ## Health
 
-### `GET /health`
-
-Returns service status, version, task counts by stage, and number of active leases.
+- `GET /health`
 
 ## Pipelines
 
-### `POST /pipelines`
+- `POST /pipelines`
+- `GET /pipelines`
+- `GET /pipelines/{id}`
 
-Creates a pipeline.
-
-Request:
+Pipeline transitions support `required_gates`:
 
 ```json
-{
-  "name": "dev-pipeline",
-  "definition": {
-    "initial": "research",
-    "states": {
-      "research": { "agent_role": "researcher" },
-      "coding": { "agent_role": "coder" },
-      "done": { "terminal": true }
-    },
-    "transitions": [
-      { "from": "research", "to": "coding", "trigger": "complete" },
-      { "from": "coding", "to": "done", "trigger": "complete" }
-    ]
-  }
-}
+{ "from": "coding", "to": "review", "trigger": "complete", "required_gates": ["tests_passed"] }
 ```
-
-Response: `201 { "id": "<pipeline-id>" }`
-
-### `GET /pipelines`
-
-Lists all pipelines.
-
-### `GET /pipelines/{id}`
-
-Returns a single pipeline object.
 
 ## Tasks
 
-### `POST /tasks`
+- `POST /tasks`
+- `POST /tasks/bulk`
+- `GET /tasks?stage=&pipeline_id=&limit=&cursor=`
+- `GET /tasks/{id}`
 
-Creates a task for a pipeline.
+`POST /tasks` and bulk items support:
 
-Request fields:
+- `retry_policy`: `{ max_attempts?, retry_delay_ms?, dead_letter_stage? }`
+- `dependencies`: `string[]` (task ids)
+- `assigned_agent_id`, `assigned_by`
 
-- `pipeline_id` (required)
-- `title` (required)
-- `description` (required)
-- `priority` (optional, default `0`)
-- `metadata` (optional JSON)
+### Dependencies
 
-### `GET /tasks`
+- `POST /tasks/{id}/dependencies` with `{ "depends_on_task_id": "..." }`
+- `GET /tasks/{id}/dependencies`
 
-Filters:
+### Assignments
 
-- `stage`
-- `pipeline_id`
-- `limit`
-
-### `GET /tasks/{id}`
-
-Returns task details, latest run (if any), and available transitions.
+- `POST /tasks/{id}/assignments` with `{ "agent_id": "...", "assigned_by": "..." }`
+- `GET /tasks/{id}/assignments`
+- `DELETE /tasks/{id}/assignments/{agent_id}`
 
 ## Leases
 
-### `POST /leases/claim`
-
-Claims the next available task for `agent_role`.
-
-Request:
-
-```json
-{
-  "agent_id": "coder-1",
-  "agent_role": "coder",
-  "lease_ttl_ms": 60000
-}
-```
-
-Responses:
-
-- `200` with `{ task, run, lease_id, lease_token, expires_at_ms }`
-- `204` when no work is available
-
-### `POST /leases/{id}/heartbeat`
-
-Extends lease expiration. Requires bearer token.
+- `POST /leases/claim`
+- `POST /leases/{id}/heartbeat` (Bearer)
 
 ## Runs
 
-### `POST /runs/{id}/events`
+- `POST /runs/{id}/events` (Bearer)
+- `GET /runs/{id}/events?limit=&cursor=`
+- `POST /runs/{id}/gates` (Bearer)
+- `GET /runs/{id}/gates`
+- `POST /runs/{id}/transition` (Bearer)
+- `POST /runs/{id}/fail` (Bearer)
 
-Appends event data for a running task. Requires bearer token.
-
-### `GET /runs/{id}/events`
-
-Lists run events in ascending order.
-
-### `POST /runs/{id}/transition`
-
-Transitions task stage by pipeline trigger. Requires bearer token.
-
-Request fields:
+`POST /runs/{id}/transition` request fields:
 
 - `trigger` (required)
 - `instructions` (optional)
 - `usage` (optional JSON)
+- `expected_stage` (optional)
+- `expected_task_version` (optional)
 
-### `POST /runs/{id}/fail`
+Transition returns `409` when:
 
-Marks run as failed and releases lease. Requires bearer token.
+- required gates are not passed
+- `expected_stage` does not match
+- `expected_task_version` does not match
 
 ## Artifacts
 
-### `POST /artifacts`
+- `POST /artifacts`
+- `GET /artifacts?task_id=&run_id=&limit=&cursor=`
 
-Creates an artifact linked to task and/or run.
+## Ops
 
-### `GET /artifacts`
+- `GET /ops/queue?near_expiry_ms=&stuck_ms=`
 
-Filters:
+Returns per-role stats:
 
-- `task_id`
-- `run_id`
+- `claimable_count`
+- `oldest_claimable_age_ms`
+- `failed_count`
+- `stuck_count`
+- `near_expiry_leases`
+
+## Pagination Contract
+
+Paginated endpoints return:
+
+```json
+{
+  "items": [...],
+  "next_cursor": "..." 
+}
+```
+
+`next_cursor = null` means end of list.
 
 ## Error Format
 

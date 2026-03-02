@@ -19,6 +19,7 @@ pub const TransitionDef = struct {
     to: []const u8,
     trigger: []const u8,
     instructions: ?[]const u8 = null,
+    required_gates: ?[]const []const u8 = null,
 };
 
 pub const ValidationError = error{
