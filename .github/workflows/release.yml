@@ -57,8 +57,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nullticket-${{ matrix.target }}
-          path: zig-out/bin/nullticket${{ matrix.ext }}
+          name: nulltickets-${{ matrix.target }}
+          path: zig-out/bin/nulltickets${{ matrix.ext }}
 
   release:
     needs: build
@@ -71,25 +71,25 @@ jobs:
 
       - name: Rename binaries
         run: |
-          mv nullticket-linux-x86_64/nullticket nullticket-linux-x86_64.bin
-          mv nullticket-linux-aarch64/nullticket nullticket-linux-aarch64.bin
-          mv nullticket-linux-riscv64/nullticket nullticket-linux-riscv64.bin
-          mv nullticket-macos-aarch64/nullticket nullticket-macos-aarch64.bin
-          mv nullticket-macos-x86_64/nullticket nullticket-macos-x86_64.bin
-          mv nullticket-windows-x86_64/nullticket.exe nullticket-windows-x86_64.exe
-          mv nullticket-windows-aarch64/nullticket.exe nullticket-windows-aarch64.exe
+          mv nulltickets-linux-x86_64/nulltickets nulltickets-linux-x86_64.bin
+          mv nulltickets-linux-aarch64/nulltickets nulltickets-linux-aarch64.bin
+          mv nulltickets-linux-riscv64/nulltickets nulltickets-linux-riscv64.bin
+          mv nulltickets-macos-aarch64/nulltickets nulltickets-macos-aarch64.bin
+          mv nulltickets-macos-x86_64/nulltickets nulltickets-macos-x86_64.bin
+          mv nulltickets-windows-x86_64/nulltickets.exe nulltickets-windows-x86_64.exe
+          mv nulltickets-windows-aarch64/nulltickets.exe nulltickets-windows-aarch64.exe
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            nullticket-linux-x86_64.bin
-            nullticket-linux-aarch64.bin
-            nullticket-linux-riscv64.bin
-            nullticket-macos-aarch64.bin
-            nullticket-macos-x86_64.bin
-            nullticket-windows-x86_64.exe
-            nullticket-windows-aarch64.exe
+            nulltickets-linux-x86_64.bin
+            nulltickets-linux-aarch64.bin
+            nulltickets-linux-riscv64.bin
+            nulltickets-macos-aarch64.bin
+            nulltickets-macos-x86_64.bin
+            nulltickets-windows-x86_64.exe
+            nulltickets-windows-aarch64.exe
           generate_release_notes: true
 
   docker:

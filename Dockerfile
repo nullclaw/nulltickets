@@ -15,22 +15,22 @@ RUN zig build -Doptimize=ReleaseSmall
 # -- Stage 2: Runtime Base (shared) ----------------------------------------
 FROM alpine:3.23 AS release-base
 
-LABEL org.opencontainers.image.source=https://github.com/nullclaw/nullticket
+LABEL org.opencontainers.image.source=https://github.com/nullclaw/nulltickets
 
 RUN apk add --no-cache ca-certificates tzdata
 
-RUN mkdir -p /nullticket-data && chown -R 65534:65534 /nullticket-data
+RUN mkdir -p /nulltickets-data && chown -R 65534:65534 /nulltickets-data
 
-COPY --from=builder /app/zig-out/bin/nullticket /usr/local/bin/nullticket
+COPY --from=builder /app/zig-out/bin/nulltickets /usr/local/bin/nulltickets
 
-ENV NULLTICKET_PORT=7700
-WORKDIR /nullticket-data
+ENV NULLTICKETS_PORT=7700
+WORKDIR /nulltickets-data
 EXPOSE 7700
-ENTRYPOINT ["nullticket"]
-CMD ["--port", "7700", "--db", "/nullticket-data/nullticket.db"]
+ENTRYPOINT ["nulltickets"]
+CMD ["--port", "7700", "--db", "/nulltickets-data/nulltickets.db"]
 
 # Optional autonomous/root mode:
-#   docker build --target release-root -t nullticket:root .
+#   docker build --target release-root -t nulltickets:root .
 FROM release-base AS release-root
 USER 0:0
 

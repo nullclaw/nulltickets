@@ -1,6 +1,6 @@
-# nullTicket Docs
+# nullTickets Docs
 
-This directory contains product and engineering documentation for `nullTicket`.
+This directory contains product and engineering documentation for `nullTickets`.
 
 ## Contents
 

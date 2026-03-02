@@ -2,12 +2,27 @@
 
 ## Overview
 
-`nullTicket` is a headless control plane for autonomous agent execution.
+`nullTickets` is a headless task tracker and lease coordinator for AI agents.
 
 - Single-process Zig service
 - SQLite persistence
 - JSON REST API
 - Lease-based run ownership
+- No built-in global orchestrator
+
+## Scope Boundaries
+
+In scope:
+
+- Pipeline/task state and durable history
+- Lease ownership and retries
+- Run events and artifacts
+
+Out of scope:
+
+- Starting/stopping agent processes
+- Scheduling and balancing policy across many agents
+- External orchestrator logic
 
 ## Runtime Components
 

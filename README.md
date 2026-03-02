@@ -1,9 +1,9 @@
-# nullTicket
+# nullTickets
 
 Headless task tracker for autonomous AI agents.
 
-`nullTicket` is a single Zig binary backed by SQLite. It exposes a REST API for
-pipeline-driven task orchestration: claim work by role, report progress, transition
+`nullTickets` is a single Zig binary backed by SQLite. It exposes a REST API for
+pipeline-driven task tracking and execution coordination: claim work by role, report progress, transition
 stages, and attach artifacts.
 
 ## Why
@@ -11,6 +11,12 @@ stages, and attach artifacts.
 - Keep agents running without manual nudging.
 - Track long-running autonomous work with durable state.
 - Enforce lease-based execution and safe retries.
+
+## Adoption Path
+
+1. Use `nullclaw` only for one-off tasks.
+2. Add `nullTickets` when you need a durable backlog (for example 100 tasks) and sequential execution with one agent loop.
+3. Add an external orchestrator only when you need multi-agent scheduling, balancing, and policy automation.
 
 ## Tech Stack
 
@@ -28,7 +34,7 @@ zig build run -- --port 7700 --db tracker.db
 Default values:
 
 - `--port`: `7700`
-- `--db`: `nullticket.db`
+- `--db`: `nulltickets.db`
 
 ## Test
 
@@ -83,7 +89,7 @@ POST /runs/{run_id}/transition  (Bearer <lease_token>)
 POST /runs/{run_id}/fail        (Bearer <lease_token>)
 ```
 
-For running `nullclaw` as role-based executors, see [nullclaw.md](nullclaw.md).
+For practical `nullclaw` integration patterns (single-agent first, multi-agent optional), see [nullclaw.md](nullclaw.md).
 
 ## Documentation
 
@@ -99,7 +105,7 @@ Agent bootstrap endpoint:
 
 ## OpenTelemetry
 
-`nullTicket` accepts OTLP traces on:
+`nullTickets` accepts OTLP traces on:
 
 - `POST /v1/traces`
 - `POST /otlp/v1/traces`
@@ -111,5 +117,5 @@ Behavior:
 
 To link telemetry to tracker entities, include span/resource attributes:
 
-- `nullticket.run_id`
-- `nullticket.task_id`
+- `nulltickets.run_id`
+- `nulltickets.task_id`

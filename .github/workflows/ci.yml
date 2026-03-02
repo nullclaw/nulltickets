@@ -60,7 +60,7 @@ jobs:
       - name: Job summary
         if: always()
         run: |
-          echo "## nullTicket CI - ${{ matrix.target }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "## nullTickets CI - ${{ matrix.target }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
@@ -72,9 +72,9 @@ jobs:
             echo "| Test MaxRSS | ${RSS:-n/a} |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          BIN="zig-out/bin/nullticket"
+          BIN="zig-out/bin/nulltickets"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            BIN="zig-out/bin/nullticket.exe"
+            BIN="zig-out/bin/nulltickets.exe"
           fi
           if [ -f "$BIN" ]; then
             SIZE=$(wc -c < "$BIN" | tr -d ' ')
@@ -86,5 +86,5 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: nullticket-${{ matrix.target }}
-          path: zig-out/bin/nullticket${{ runner.os == 'Windows' && '.exe' || '' }}
+          name: nulltickets-${{ matrix.target }}
+          path: zig-out/bin/nulltickets${{ runner.os == 'Windows' && '.exe' || '' }}
