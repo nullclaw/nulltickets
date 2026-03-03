@@ -13,7 +13,10 @@ pub fn run() !void {
         \\    "aarch64-macos": { "asset": "nulltickets-macos-aarch64", "binary": "nulltickets" },
         \\    "x86_64-macos": { "asset": "nulltickets-macos-x86_64", "binary": "nulltickets" },
         \\    "x86_64-linux": { "asset": "nulltickets-linux-x86_64", "binary": "nulltickets" },
-        \\    "aarch64-linux": { "asset": "nulltickets-linux-aarch64", "binary": "nulltickets" }
+        \\    "aarch64-linux": { "asset": "nulltickets-linux-aarch64", "binary": "nulltickets" },
+        \\    "riscv64-linux": { "asset": "nulltickets-linux-riscv64", "binary": "nulltickets" },
+        \\    "x86_64-windows": { "asset": "nulltickets-windows-x86_64.exe", "binary": "nulltickets.exe" },
+        \\    "aarch64-windows": { "asset": "nulltickets-windows-aarch64.exe", "binary": "nulltickets.exe" }
         \\  },
         \\  "build_from_source": {
         \\    "zig_version": "0.15.2",
