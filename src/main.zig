@@ -3,7 +3,7 @@ const Store = @import("store.zig").Store;
 const api = @import("api.zig");
 const config = @import("config.zig");
 
-const version = "0.1.0";
+const version = "2026.3.2";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

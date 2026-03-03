@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "nullTickets API",
-    "version": "0.1.0",
+    "version": "2026.3.2",
     "description": "Headless AI task tracker API with leases, quality gates, dependencies, assignments, pagination, and orchestrator ops endpoints."
   },
   "servers": [

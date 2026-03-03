@@ -5,7 +5,7 @@ const domain = @import("domain.zig");
 const ids = @import("ids.zig");
 const log = std.log.scoped(.api);
 
-const version = "0.1.0";
+const version = "2026.3.2";
 const openapi_spec = @embedFile("openapi.json");
 
 const OtlpKeyValue = struct {
