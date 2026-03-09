@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const config_mod = @import("config.zig");
 
 pub fn run(allocator: std.mem.Allocator, json_str: []const u8) !void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{
@@ -19,7 +21,11 @@ pub fn run(allocator: std.mem.Allocator, json_str: []const u8) !void {
     const port = getU16(obj, "port") orelse 7700;
     const db_path = getString(obj, "db_path") orelse "nulltickets.db";
     const api_token = getString(obj, "api_token");
-    const home = getString(obj, "home") orelse ".";
+    const home = resolveHome(allocator, getString(obj, "home")) catch |err| {
+        std.debug.print("error: failed to resolve home: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer allocator.free(home);
 
     const config_json = try std.json.Stringify.valueAlloc(allocator, .{
         .port = port,
@@ -31,8 +37,10 @@ pub fn run(allocator: std.mem.Allocator, json_str: []const u8) !void {
     try ensureHome(home);
     try writeFileAtHome(allocator, home, "config.json", config_json);
 
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll("{\"status\":\"ok\"}\n");
+    if (!builtin.is_test) {
+        const stdout = std.fs.File.stdout();
+        try stdout.writeAll("{\"status\":\"ok\"}\n");
+    }
 }
 
 fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -80,4 +88,9 @@ fn writeFileAtHome(allocator: std.mem.Allocator, home: []const u8, name: []const
     defer file.close();
     try file.writeAll(contents);
     try file.writeAll("\n");
+}
+
+fn resolveHome(allocator: std.mem.Allocator, json_home: ?[]const u8) ![]const u8 {
+    if (json_home) |home| return allocator.dupe(u8, home);
+    return config_mod.resolveHomeDir(allocator);
 }

@@ -39,7 +39,7 @@ pub fn main() !void {
     var port_override: ?u16 = null;
     var db_override: ?[:0]const u8 = null;
     var token_override: ?[]const u8 = null;
-    var config_path: []const u8 = "config.json";
+    var config_path_override: ?[]const u8 = null;
 
     while (args2.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
@@ -59,7 +59,7 @@ pub fn main() !void {
             }
         } else if (std.mem.eql(u8, arg, "--config")) {
             if (args2.next()) |val| {
-                config_path = val;
+                config_path_override = val;
             }
         } else if (std.mem.eql(u8, arg, "--version")) {
             std.debug.print("nulltickets v{s}\n", .{version});
@@ -69,8 +69,16 @@ pub fn main() !void {
 
     var cfg_arena = std.heap.ArenaAllocator.init(allocator);
     defer cfg_arena.deinit();
-    const cfg = config.loadFromFile(cfg_arena.allocator(), config_path) catch |err| {
+    const config_path = config.resolveConfigPath(cfg_arena.allocator(), config_path_override) catch |err| {
+        std.debug.print("failed to resolve config path: {}\n", .{err});
+        return;
+    };
+    var cfg = config.loadFromFile(cfg_arena.allocator(), config_path) catch |err| {
         std.debug.print("failed to load config from {s}: {}\n", .{ config_path, err });
+        return;
+    };
+    config.resolveRelativePaths(cfg_arena.allocator(), config_path, &cfg) catch |err| {
+        std.debug.print("failed to resolve config paths from {s}: {}\n", .{ config_path, err });
         return;
     };
 
@@ -92,6 +100,11 @@ pub fn main() !void {
     } else {
         std.debug.print("API auth: disabled\n", .{});
     }
+
+    ensureParentDirForFile(db_path) catch |err| {
+        std.debug.print("failed to create database directory for {s}: {}\n", .{ db_path, err });
+        return;
+    };
 
     var store = try Store.init(allocator, db_path);
     defer store.deinit();
@@ -177,6 +190,26 @@ pub fn main() !void {
         _ = conn.stream.write(header) catch continue;
         _ = conn.stream.write(response.body) catch continue;
     }
+}
+
+fn ensureParentDirForFile(path: []const u8) !void {
+    if (path.len == 0 or std.mem.eql(u8, path, ":memory:") or std.mem.startsWith(u8, path, "file:")) return;
+
+    const parent = std.fs.path.dirname(path) orelse return;
+    if (parent.len == 0) return;
+
+    if (std.fs.path.isAbsolute(parent)) {
+        std.fs.makeDirAbsolute(parent) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        return;
+    }
+
+    std.fs.cwd().makePath(parent) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
 }
 
 const max_request_size: usize = 65_536;

@@ -67,6 +67,15 @@ Default values:
 - `--port`: `7700`
 - `--db`: `nulltickets.db`
 
+Config location:
+
+- Default config path: `~/.nulltickets/config.json`
+- Override instance home with `NULLTICKETS_HOME=/path/to/dir`
+- Override config file directly with `--config /path/to/config.json`
+
+When `NULLTICKETS_HOME` is set, `nulltickets` reads `config.json` from that directory and
+resolves relative `db` paths relative to that config file.
+
 ## Test
 
 ```bash
