@@ -28,6 +28,7 @@ pub fn run() !void {
         \\  "ports": [{ "name": "api", "config_key": "port", "default": 7700, "protocol": "http" }],
         \\  "wizard": { "steps": [
         \\    { "id": "port", "title": "API Port", "type": "number", "required": true, "options": [] },
+        \\    { "id": "api_token", "title": "API Token", "description": "Optional bearer token for tracker API auth", "type": "secret", "required": false, "options": [] },
         \\    { "id": "db_path", "title": "Database Path", "type": "text", "required": true, "options": [] }
         \\  ] },
         \\  "depends_on": [],

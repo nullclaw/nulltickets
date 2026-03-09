@@ -38,6 +38,7 @@ pub fn main() !void {
 
     var port_override: ?u16 = null;
     var db_override: ?[:0]const u8 = null;
+    var token_override: ?[]const u8 = null;
     var config_path: []const u8 = "config.json";
 
     while (args2.next()) |arg| {
@@ -51,6 +52,10 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "--db")) {
             if (args2.next()) |val| {
                 db_override = val;
+            }
+        } else if (std.mem.eql(u8, arg, "--token")) {
+            if (args2.next()) |val| {
+                token_override = val;
             }
         } else if (std.mem.eql(u8, arg, "--config")) {
             if (args2.next()) |val| {
@@ -70,6 +75,7 @@ pub fn main() !void {
     };
 
     const port = port_override orelse cfg.port;
+    const api_token = token_override orelse cfg.api_token;
     const db_path: [:0]const u8 = db_override orelse blk: {
         const db_z = cfg_arena.allocator().allocSentinel(u8, cfg.db.len, 0) catch {
             std.debug.print("out of memory\n", .{});
@@ -81,6 +87,11 @@ pub fn main() !void {
 
     std.debug.print("nulltickets v{s}\n", .{version});
     std.debug.print("opening database: {s}\n", .{db_path});
+    if (api_token != null) {
+        std.debug.print("API auth: bearer token enabled\n", .{});
+    } else {
+        std.debug.print("API auth: disabled\n", .{});
+    }
 
     var store = try Store.init(allocator, db_path);
     defer store.deinit();
@@ -152,6 +163,7 @@ pub fn main() !void {
         var ctx = api.Context{
             .store = &store,
             .allocator = req_alloc,
+            .required_api_token = api_token,
         };
         const response = api.handleRequest(&ctx, method, target, body, full_request);
 

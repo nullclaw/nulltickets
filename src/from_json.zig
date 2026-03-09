@@ -1,28 +1,83 @@
 const std = @import("std");
 
 pub fn run(allocator: std.mem.Allocator, json_str: []const u8) !void {
-    const parsed = std.json.parseFromSlice(
-        struct { port: u16 = 7700, db_path: []const u8 = "nulltickets.db" },
-        allocator,
-        json_str,
-        .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
-    ) catch {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch {
         std.debug.print("error: invalid JSON\n", .{});
         std.process.exit(1);
     };
     defer parsed.deinit();
 
+    if (parsed.value != .object) {
+        std.debug.print("error: invalid JSON\n", .{});
+        std.process.exit(1);
+    }
+
+    const obj = parsed.value.object;
+    const port = getU16(obj, "port") orelse 7700;
+    const db_path = getString(obj, "db_path") orelse "nulltickets.db";
+    const api_token = getString(obj, "api_token");
+    const home = getString(obj, "home") orelse ".";
+
     const config_json = try std.json.Stringify.valueAlloc(allocator, .{
-        .port = parsed.value.port,
-        .db = parsed.value.db_path,
-    }, .{ .whitespace = .indent_2 });
+        .port = port,
+        .db = db_path,
+        .api_token = api_token,
+    }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
     defer allocator.free(config_json);
 
-    const file = try std.fs.cwd().createFile("config.json", .{});
-    defer file.close();
-    try file.writeAll(config_json);
-    try file.writeAll("\n");
+    try ensureHome(home);
+    try writeFileAtHome(allocator, home, "config.json", config_json);
 
     const stdout = std.fs.File.stdout();
     try stdout.writeAll("{\"status\":\"ok\"}\n");
+}
+
+fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = obj.get(key) orelse return null;
+    return if (value == .string) value.string else null;
+}
+
+fn getU16(obj: std.json.ObjectMap, key: []const u8) ?u16 {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .integer => |v| if (v >= 0 and v <= std.math.maxInt(u16)) @intCast(v) else null,
+        .string => |v| std.fmt.parseInt(u16, v, 10) catch null,
+        else => null,
+    };
+}
+
+fn ensureHome(home: []const u8) !void {
+    if (std.fs.path.isAbsolute(home)) {
+        std.fs.makeDirAbsolute(home) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        return;
+    }
+
+    std.fs.cwd().makePath(home) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+}
+
+fn writeFileAtHome(allocator: std.mem.Allocator, home: []const u8, name: []const u8, contents: []const u8) !void {
+    const path = try std.fs.path.join(allocator, &.{ home, name });
+    defer allocator.free(path);
+
+    if (std.fs.path.isAbsolute(home)) {
+        const file = try std.fs.createFileAbsolute(path, .{});
+        defer file.close();
+        try file.writeAll(contents);
+        try file.writeAll("\n");
+        return;
+    }
+
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+    try file.writeAll(contents);
+    try file.writeAll("\n");
 }

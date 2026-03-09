@@ -3,6 +3,7 @@ const std = @import("std");
 pub const Config = struct {
     port: u16 = 7700,
     db: []const u8 = "nulltickets.db",
+    api_token: ?[]const u8 = null,
 };
 
 /// Load runtime config from JSON file. Missing file means defaults.
@@ -24,6 +25,7 @@ test "loadFromFile returns defaults when missing" {
     const cfg = try loadFromFile(std.testing.allocator, "nonexistent-config-file-12345.json");
     try std.testing.expectEqual(@as(u16, 7700), cfg.port);
     try std.testing.expectEqualStrings("nulltickets.db", cfg.db);
+    try std.testing.expectEqual(@as(?[]const u8, null), cfg.api_token);
 }
 
 test "loadFromFile reads config values" {
@@ -35,7 +37,8 @@ test "loadFromFile reads config values" {
         .data =
         \\{
         \\  "port": 7788,
-        \\  "db": "tickets.db"
+        \\  "db": "tickets.db",
+        \\  "api_token": "secret"
         \\}
         ,
     });
@@ -49,4 +52,5 @@ test "loadFromFile reads config values" {
     const cfg = try loadFromFile(arena.allocator(), cfg_path);
     try std.testing.expectEqual(@as(u16, 7788), cfg.port);
     try std.testing.expectEqualStrings("tickets.db", cfg.db);
+    try std.testing.expectEqualStrings("secret", cfg.api_token.?);
 }

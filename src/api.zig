@@ -77,6 +77,7 @@ const IdempotencyContext = struct {
 pub const Context = struct {
     store: *Store,
     allocator: std.mem.Allocator,
+    required_api_token: ?[]const u8 = null,
 };
 
 pub const HttpResponse = struct {
@@ -104,6 +105,11 @@ pub fn handleRequest(
     const is_delete = std.mem.eql(u8, method, "DELETE");
 
     const is_write = is_post or is_delete;
+    const request_token = extractBearerToken(raw_request);
+
+    if (!isAuthorized(ctx, seg0, seg1, seg2, request_token)) {
+        return respondError(ctx.allocator, 401, "unauthorized", "Missing or invalid Authorization header");
+    }
 
     var idempotency: ?IdempotencyContext = null;
 
@@ -1446,6 +1452,35 @@ fn eql(a: ?[]const u8, b: []const u8) bool {
     return false;
 }
 
+fn isAuthorized(
+    ctx: *Context,
+    seg0: ?[]const u8,
+    seg1: ?[]const u8,
+    seg2: ?[]const u8,
+    request_token: ?[]const u8,
+) bool {
+    const required = ctx.required_api_token orelse return true;
+
+    if (eql(seg0, "health") and seg1 == null) return true;
+    if (eql(seg0, "openapi.json") and seg1 == null) return true;
+    if (eql(seg0, ".well-known") and eql(seg1, "openapi.json") and seg2 == null) return true;
+
+    if (requiresLeaseOrAdminToken(seg0, seg1, seg2)) {
+        return request_token != null;
+    }
+
+    const provided = request_token orelse return false;
+    return std.mem.eql(u8, provided, required);
+}
+
+fn requiresLeaseOrAdminToken(seg0: ?[]const u8, seg1: ?[]const u8, seg2: ?[]const u8) bool {
+    if (eql(seg0, "leases") and seg1 != null and eql(seg2, "heartbeat")) return true;
+    if (eql(seg0, "runs") and seg1 != null and seg2 != null) {
+        return eql(seg2, "events") or eql(seg2, "gates") or eql(seg2, "transition") or eql(seg2, "fail");
+    }
+    return false;
+}
+
 pub fn extractBody(raw: []const u8) []const u8 {
     if (std.mem.indexOf(u8, raw, "\r\n\r\n")) |pos| {
         const body_start = pos + 4;
@@ -1502,4 +1537,49 @@ fn respondError(allocator: std.mem.Allocator, status_code: u16, code: []const u8
 
 fn serverError(allocator: std.mem.Allocator) HttpResponse {
     return respondError(allocator, 500, "internal_error", "Internal server error");
+}
+
+test "auth allows health without API token" {
+    var store = try Store.init(std.testing.allocator, ":memory:");
+    defer store.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = std.testing.allocator,
+        .required_api_token = "secret",
+    };
+
+    const resp = handleRequest(&ctx, "GET", "/health", "", "GET /health HTTP/1.1\r\n\r\n");
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+}
+
+test "auth rejects protected endpoint without API token" {
+    var store = try Store.init(std.testing.allocator, ":memory:");
+    defer store.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = std.testing.allocator,
+        .required_api_token = "secret",
+    };
+
+    const resp = handleRequest(&ctx, "GET", "/tasks", "", "GET /tasks HTTP/1.1\r\n\r\n");
+    try std.testing.expectEqualStrings("401 Unauthorized", resp.status);
+}
+
+test "auth accepts admin token for protected endpoint" {
+    var store = try Store.init(std.testing.allocator, ":memory:");
+    defer store.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = std.testing.allocator,
+        .required_api_token = "secret",
+    };
+
+    const raw =
+        "GET /tasks HTTP/1.1\r\n" ++
+        "Authorization: Bearer secret\r\n\r\n";
+    const resp = handleRequest(&ctx, "GET", "/tasks", "", raw);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
 }
