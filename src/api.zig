@@ -199,6 +199,11 @@ pub fn handleRequest(
             return response;
         }
 
+        if (is_get and seg1 != null and eql(seg2, "run-state") and seg3 == null) {
+            response = handleGetTaskRunState(ctx, seg1.?);
+            return response;
+        }
+
         if (seg1 != null and eql(seg2, "dependencies")) {
             if (is_post and seg3 == null) {
                 response = handleAddTaskDependency(ctx, seg1.?, body);
@@ -246,14 +251,6 @@ pub fn handleRequest(
         }
         if (is_get and eql(seg2, "events")) {
             response = handleListEvents(ctx, seg1.?, path.query);
-            return response;
-        }
-        if (is_post and eql(seg2, "gates")) {
-            response = handleAddGateResult(ctx, seg1.?, body, raw_request);
-            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
-        }
-        if (is_get and eql(seg2, "gates")) {
-            response = handleListGateResults(ctx, seg1.?);
             return response;
         }
         if (is_post and eql(seg2, "transition")) {
@@ -981,7 +978,6 @@ fn handleTransition(ctx: *Context, run_id: []const u8, body: []const u8, raw_req
             error.RunNotFound => respondError(ctx.allocator, 404, "not_found", "Run not found"),
             error.RunNotRunning => respondError(ctx.allocator, 409, "conflict", "Run is not in running state"),
             error.InvalidTransition => respondError(ctx.allocator, 400, "invalid_transition", "No valid transition for this trigger from current stage"),
-            error.RequiredGatesNotPassed => respondError(ctx.allocator, 409, "required_gates_not_passed", "Required quality gates are not passed"),
             error.ExpectedStageMismatch => respondError(ctx.allocator, 409, "expected_stage_mismatch", "Current task stage does not match expected_stage"),
             error.TaskVersionMismatch => respondError(ctx.allocator, 409, "task_version_mismatch", "Current task version does not match expected_task_version"),
             else => serverError(ctx.allocator),
@@ -1202,70 +1198,14 @@ fn handleUnassignTask(ctx: *Context, task_id: []const u8, agent_id: []const u8) 
     return .{ .status = "200 OK", .body = "{\"status\":\"unassigned\"}" };
 }
 
-fn handleAddGateResult(ctx: *Context, run_id: []const u8, body: []const u8, raw_request: []const u8) HttpResponse {
-    const token = extractBearerToken(raw_request) orelse {
-        return respondError(ctx.allocator, 401, "unauthorized", "Missing Authorization header");
-    };
-    ctx.store.validateLeaseByRunId(run_id, token) catch |err| {
-        return switch (err) {
-            error.LeaseNotFound => respondError(ctx.allocator, 404, "not_found", "No active lease for this run"),
-            error.InvalidToken => respondError(ctx.allocator, 401, "unauthorized", "Invalid token"),
-            error.LeaseExpired => respondError(ctx.allocator, 410, "expired", "Lease expired"),
-            else => serverError(ctx.allocator),
-        };
-    };
-
-    var parsed = std.json.parseFromSlice(struct {
-        gate: []const u8,
-        status: []const u8,
-        evidence: ?std.json.Value = null,
-        actor: ?[]const u8 = null,
-    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
-        return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
-    };
-    defer parsed.deinit();
-
-    if (!std.mem.eql(u8, parsed.value.status, "pass") and !std.mem.eql(u8, parsed.value.status, "fail")) {
-        return respondError(ctx.allocator, 400, "invalid_status", "status must be pass or fail");
+fn handleGetTaskRunState(ctx: *Context, task_id: []const u8) HttpResponse {
+    const run_id = ctx.store.getTaskRunId(task_id) catch return serverError(ctx.allocator);
+    if (run_id) |rid| {
+        defer ctx.allocator.free(rid);
+        const resp = std.fmt.allocPrint(ctx.allocator, "{{\"run_id\":\"{s}\"}}", .{rid}) catch return serverError(ctx.allocator);
+        return .{ .status = "200 OK", .body = resp };
     }
-
-    const evidence_json = if (parsed.value.evidence) |e| (jsonStringify(ctx.allocator, e) catch "{}") else "{}";
-    const id = ctx.store.addGateResult(run_id, parsed.value.gate, parsed.value.status, evidence_json, parsed.value.actor) catch |err| {
-        return switch (err) {
-            error.RunNotFound => respondError(ctx.allocator, 404, "not_found", "Run not found"),
-            else => serverError(ctx.allocator),
-        };
-    };
-
-    const resp = std.fmt.allocPrint(ctx.allocator, "{{\"id\":{d}}}", .{id}) catch return serverError(ctx.allocator);
-    return .{ .status = "201 Created", .body = resp, .status_code = 201 };
-}
-
-fn handleListGateResults(ctx: *Context, run_id: []const u8) HttpResponse {
-    const rows = ctx.store.listGateResults(run_id) catch return serverError(ctx.allocator);
-    defer ctx.store.freeGateResultRows(rows);
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    var w = buf.writer(ctx.allocator);
-    w.writeAll("[") catch return serverError(ctx.allocator);
-    for (rows, 0..) |row, i| {
-        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-        w.writeAll("{") catch return serverError(ctx.allocator);
-        w.print("\"id\":{d},", .{row.id}) catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "run_id", row.run_id) catch return serverError(ctx.allocator);
-        w.writeAll(",") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "task_id", row.task_id) catch return serverError(ctx.allocator);
-        w.writeAll(",") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "gate", row.gate) catch return serverError(ctx.allocator);
-        w.writeAll(",") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "status", row.status) catch return serverError(ctx.allocator);
-        w.print(",\"evidence\":{s},", .{row.evidence_json}) catch return serverError(ctx.allocator);
-        writeNullableStringField(&w, ctx.allocator, "actor", row.actor) catch return serverError(ctx.allocator);
-        w.print(",\"ts_ms\":{d}", .{row.ts_ms}) catch return serverError(ctx.allocator);
-        w.writeAll("}") catch return serverError(ctx.allocator);
-    }
-    w.writeAll("]") catch return serverError(ctx.allocator);
-    return .{ .status = "200 OK", .body = buf.items };
+    return respondError(ctx.allocator, 404, "not_found", "Task has no run_id");
 }
 
 fn handleQueueOps(ctx: *Context, query: ?[]const u8) HttpResponse {
@@ -1476,7 +1416,7 @@ fn isAuthorized(
 fn requiresLeaseOrAdminToken(seg0: ?[]const u8, seg1: ?[]const u8, seg2: ?[]const u8) bool {
     if (eql(seg0, "leases") and seg1 != null and eql(seg2, "heartbeat")) return true;
     if (eql(seg0, "runs") and seg1 != null and seg2 != null) {
-        return eql(seg2, "events") or eql(seg2, "gates") or eql(seg2, "transition") or eql(seg2, "fail");
+        return eql(seg2, "events") or eql(seg2, "transition") or eql(seg2, "fail");
     }
     return false;
 }

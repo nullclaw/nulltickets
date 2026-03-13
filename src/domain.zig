@@ -12,6 +12,7 @@ pub const StateDef = struct {
     agent_role: ?[]const u8 = null,
     description: ?[]const u8 = null,
     terminal: ?bool = null,
+    workflow_id: ?[]const u8 = null,
 };
 
 pub const TransitionDef = struct {

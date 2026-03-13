@@ -82,17 +82,6 @@ pub const DependencyRow = struct {
     resolved: bool,
 };
 
-pub const GateResultRow = struct {
-    id: i64,
-    run_id: []const u8,
-    task_id: []const u8,
-    gate: []const u8,
-    status: []const u8,
-    evidence_json: []const u8,
-    actor: ?[]const u8,
-    ts_ms: i64,
-};
-
 pub const AssignmentRow = struct {
     task_id: []const u8,
     agent_id: []const u8,
@@ -629,47 +618,6 @@ pub const Store = struct {
         return results.toOwnedSlice(self.allocator);
     }
 
-    pub fn addGateResult(self: *Self, run_id: []const u8, gate: []const u8, status: []const u8, evidence_json: []const u8, actor: ?[]const u8) !i64 {
-        const run_stmt = try self.prepare("SELECT task_id FROM runs WHERE id = ?;");
-        defer _ = c.sqlite3_finalize(run_stmt);
-        self.bindText(run_stmt, 1, run_id);
-        if (c.sqlite3_step(run_stmt) != c.SQLITE_ROW) return error.RunNotFound;
-        const task_id = self.colTextView(run_stmt, 0);
-
-        const stmt = try self.prepare("INSERT INTO gate_results (run_id, task_id, gate, status, evidence_json, actor, ts_ms) VALUES (?, ?, ?, ?, ?, ?, ?);");
-        defer _ = c.sqlite3_finalize(stmt);
-        self.bindText(stmt, 1, run_id);
-        self.bindText(stmt, 2, task_id);
-        self.bindText(stmt, 3, gate);
-        self.bindText(stmt, 4, status);
-        self.bindText(stmt, 5, evidence_json);
-        if (actor) |value| self.bindText(stmt, 6, value) else _ = c.sqlite3_bind_null(stmt, 6);
-        _ = c.sqlite3_bind_int64(stmt, 7, ids.nowMs());
-        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.InsertFailed;
-        return c.sqlite3_last_insert_rowid(self.db);
-    }
-
-    pub fn listGateResults(self: *Self, run_id: []const u8) ![]GateResultRow {
-        const stmt = try self.prepare("SELECT id, run_id, task_id, gate, status, evidence_json, actor, ts_ms FROM gate_results WHERE run_id = ? ORDER BY id ASC;");
-        defer _ = c.sqlite3_finalize(stmt);
-        self.bindText(stmt, 1, run_id);
-
-        var results: std.ArrayListUnmanaged(GateResultRow) = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            try results.append(self.allocator, .{
-                .id = c.sqlite3_column_int64(stmt, 0),
-                .run_id = self.colText(stmt, 1),
-                .task_id = self.colText(stmt, 2),
-                .gate = self.colText(stmt, 3),
-                .status = self.colText(stmt, 4),
-                .evidence_json = self.colText(stmt, 5),
-                .actor = self.colTextNullable(stmt, 6),
-                .ts_ms = c.sqlite3_column_int64(stmt, 7),
-            });
-        }
-        return results.toOwnedSlice(self.allocator);
-    }
-
     pub fn listTasksPage(self: *Self, stage_filter: ?[]const u8, pipeline_id_filter: ?[]const u8, cursor_created_at_ms: ?i64, cursor_id: ?[]const u8, limit: i64) !TaskPage {
         const page_limit: usize = @intCast(limit);
         var sql_buf: [1024]u8 = undefined;
@@ -1088,21 +1036,6 @@ pub const Store = struct {
         if (expires <= ids.nowMs()) return error.LeaseExpired;
     }
 
-    fn areRequiredGatesPassed(self: *Self, run_id: []const u8, required_gates: []const []const u8) !bool {
-        for (required_gates) |gate| {
-            const stmt = try self.prepare("SELECT status FROM gate_results WHERE run_id = ? AND gate = ? ORDER BY id DESC LIMIT 1;");
-            defer _ = c.sqlite3_finalize(stmt);
-            self.bindText(stmt, 1, run_id);
-            self.bindText(stmt, 2, gate);
-
-            if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return false;
-            const status = self.colTextView(stmt, 0);
-            if (!std.mem.eql(u8, status, "pass")) return false;
-        }
-
-        return true;
-    }
-
     // ===== Events =====
 
     pub fn addEvent(self: *Self, run_id: []const u8, kind: []const u8, data_json: []const u8) !i64 {
@@ -1189,11 +1122,6 @@ pub const Store = struct {
         var parsed = domain.parseAndValidate(temp_alloc, def_json) catch return error.InvalidPipeline;
         defer parsed.deinit();
         const transition = domain.findTransition(parsed.value, current_stage, trigger) orelse return error.InvalidTransition;
-
-        if (transition.required_gates) |required_gates| {
-            const gates_ok = try self.areRequiredGatesPassed(run_id, required_gates);
-            if (!gates_ok) return error.RequiredGatesNotPassed;
-        }
 
         // Update run
         {
@@ -1463,18 +1391,6 @@ pub const Store = struct {
     pub fn freeDependencyRows(self: *Self, rows: []DependencyRow) void {
         for (rows) |row| {
             self.allocator.free(row.depends_on_task_id);
-        }
-        self.allocator.free(rows);
-    }
-
-    pub fn freeGateResultRows(self: *Self, rows: []GateResultRow) void {
-        for (rows) |row| {
-            self.allocator.free(row.run_id);
-            self.allocator.free(row.task_id);
-            self.allocator.free(row.gate);
-            self.allocator.free(row.status);
-            self.allocator.free(row.evidence_json);
-            if (row.actor) |actor| self.allocator.free(actor);
         }
         self.allocator.free(rows);
     }
@@ -1978,5 +1894,31 @@ pub const Store = struct {
     fn colInt64Nullable(_: *Self, stmt: *c.sqlite3_stmt, col: c_int) ?i64 {
         if (c.sqlite3_column_type(stmt, col) == c.SQLITE_NULL) return null;
         return c.sqlite3_column_int64(stmt, col);
+    }
+
+    // ===== Orchestration =====
+
+    pub fn updateTaskRunId(self: *Self, task_id: []const u8, run_id: []const u8) !void {
+        const stmt = try self.prepare("UPDATE tasks SET run_id = ? WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, run_id);
+        self.bindText(stmt, 2, task_id);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.UpdateFailed;
+    }
+
+    pub fn updateTaskWorkflowState(self: *Self, task_id: []const u8, state_json: []const u8) !void {
+        const stmt = try self.prepare("UPDATE tasks SET workflow_state_json = ? WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, state_json);
+        self.bindText(stmt, 2, task_id);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.UpdateFailed;
+    }
+
+    pub fn getTaskRunId(self: *Self, task_id: []const u8) !?[]const u8 {
+        const stmt = try self.prepare("SELECT run_id FROM tasks WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, task_id);
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+        return self.colTextNullable(stmt, 0);
     }
 };
