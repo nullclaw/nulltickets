@@ -98,6 +98,14 @@ pub const IdempotencyRow = struct {
     created_at_ms: i64,
 };
 
+pub const StoreEntry = struct {
+    namespace: []const u8,
+    key: []const u8,
+    value_json: []const u8,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+};
+
 pub const QueueRoleStats = struct {
     role: []const u8,
     claimable_count: i64,
@@ -252,6 +260,20 @@ pub const Store = struct {
 
         try self.execSimple("CREATE INDEX IF NOT EXISTS idx_tasks_next_eligible ON tasks(next_eligible_at_ms);");
         try self.execSimple("CREATE INDEX IF NOT EXISTS idx_tasks_dead_letter_reason ON tasks(dead_letter_reason);");
+
+        // Migration 003: store table
+        {
+            const store_sql = @embedFile("migrations/003_store.sql");
+            var store_err: [*c]u8 = null;
+            const store_rc = c.sqlite3_exec(self.db, store_sql.ptr, null, null, &store_err);
+            if (store_rc != c.SQLITE_OK) {
+                if (store_err) |msg| {
+                    log.err("migration 003 failed (rc={d}): {s}", .{ store_rc, std.mem.span(msg) });
+                    c.sqlite3_free(msg);
+                }
+                return error.MigrationFailed;
+            }
+        }
     }
 
     fn ensureColumn(self: *Self, table_name: []const u8, column_name: []const u8, alter_sql: [*:0]const u8) !void {
@@ -775,7 +797,7 @@ pub const Store = struct {
 
     // ===== Claim + Lease =====
 
-    pub fn claimTask(self: *Self, agent_id: []const u8, agent_role: []const u8, lease_ttl_ms: i64) !?ClaimResult {
+    pub fn claimTask(self: *Self, agent_id: []const u8, agent_role: []const u8, lease_ttl_ms: i64, per_state_concurrency: ?std.json.Value) !?ClaimResult {
         // BEGIN IMMEDIATE to prevent double-claim
         try self.execSimple("BEGIN IMMEDIATE;");
         errdefer self.execSimple("ROLLBACK;") catch {};
@@ -848,6 +870,23 @@ pub const Store = struct {
                 const candidate = try self.readTaskRowAlloc(temp_alloc, fstmt);
                 if (!(try self.isTaskDependenciesSatisfied(candidate.id)) or !(try self.isTaskAssignableToAgent(candidate.id, agent_id))) {
                     continue;
+                }
+
+                // Per-state concurrency check
+                if (per_state_concurrency) |psc| {
+                    if (psc == .object) {
+                        if (psc.object.get(candidate.stage)) |limit_val| {
+                            const limit: i64 = switch (limit_val) {
+                                .integer => |v| v,
+                                .float => |v| @intFromFloat(v),
+                                else => 0,
+                            };
+                            if (limit > 0) {
+                                const leased_count = try self.countLeasedTasksInState(candidate.stage, now_ms);
+                                if (leased_count >= limit) continue;
+                            }
+                        }
+                    }
                 }
 
                 if (task_row) |existing| {
@@ -1012,6 +1051,19 @@ pub const Store = struct {
         }
 
         return !has_active_assignment;
+    }
+
+    fn countLeasedTasksInState(self: *Self, state: []const u8, now_ms: i64) !i64 {
+        const stmt = try self.prepare(
+            "SELECT COUNT(*) FROM tasks t WHERE t.stage = ? AND EXISTS (SELECT 1 FROM leases l JOIN runs r ON l.run_id = r.id WHERE r.task_id = t.id AND l.expires_at_ms > ?);",
+        );
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, state);
+        _ = c.sqlite3_bind_int64(stmt, 2, now_ms);
+        if (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            return c.sqlite3_column_int64(stmt, 0);
+        }
+        return 0;
     }
 
     pub fn validateLeaseByRunId(self: *Self, run_id: []const u8, token_hex: []const u8) !void {
@@ -1788,6 +1840,82 @@ pub const Store = struct {
         return roles.toOwnedSlice(self.allocator);
     }
 
+    // ===== Store (KV) =====
+
+    pub fn storePut(self: *Self, namespace: []const u8, key: []const u8, value_json: []const u8) !void {
+        const now_ms = ids.nowMs();
+        const stmt = try self.prepare(
+            "INSERT OR REPLACE INTO store (namespace, key, value_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?);",
+        );
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, namespace);
+        self.bindText(stmt, 2, key);
+        self.bindText(stmt, 3, value_json);
+        _ = c.sqlite3_bind_int64(stmt, 4, now_ms);
+        _ = c.sqlite3_bind_int64(stmt, 5, now_ms);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.InsertFailed;
+    }
+
+    pub fn storeGet(self: *Self, alloc: std.mem.Allocator, namespace: []const u8, key: []const u8) !?StoreEntry {
+        const stmt = try self.prepare("SELECT namespace, key, value_json, created_at_ms, updated_at_ms FROM store WHERE namespace = ? AND key = ?;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, namespace);
+        self.bindText(stmt, 2, key);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+        return .{
+            .namespace = try alloc.dupe(u8, self.colTextView(stmt, 0)),
+            .key = try alloc.dupe(u8, self.colTextView(stmt, 1)),
+            .value_json = try alloc.dupe(u8, self.colTextView(stmt, 2)),
+            .created_at_ms = c.sqlite3_column_int64(stmt, 3),
+            .updated_at_ms = c.sqlite3_column_int64(stmt, 4),
+        };
+    }
+
+    pub fn storeList(self: *Self, alloc: std.mem.Allocator, namespace: []const u8) ![]StoreEntry {
+        const stmt = try self.prepare("SELECT namespace, key, value_json, created_at_ms, updated_at_ms FROM store WHERE namespace = ? ORDER BY key;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, namespace);
+
+        var results: std.ArrayListUnmanaged(StoreEntry) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try results.append(alloc, .{
+                .namespace = try alloc.dupe(u8, self.colTextView(stmt, 0)),
+                .key = try alloc.dupe(u8, self.colTextView(stmt, 1)),
+                .value_json = try alloc.dupe(u8, self.colTextView(stmt, 2)),
+                .created_at_ms = c.sqlite3_column_int64(stmt, 3),
+                .updated_at_ms = c.sqlite3_column_int64(stmt, 4),
+            });
+        }
+        return results.toOwnedSlice(alloc);
+    }
+
+    pub fn storeDelete(self: *Self, namespace: []const u8, key: []const u8) !void {
+        const stmt = try self.prepare("DELETE FROM store WHERE namespace = ? AND key = ?;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, namespace);
+        self.bindText(stmt, 2, key);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.DeleteFailed;
+    }
+
+    pub fn storeDeleteNamespace(self: *Self, namespace: []const u8) !void {
+        const stmt = try self.prepare("DELETE FROM store WHERE namespace = ?;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, namespace);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.DeleteFailed;
+    }
+
+    pub fn freeStoreEntry(self: *Self, entry: StoreEntry) void {
+        self.allocator.free(entry.namespace);
+        self.allocator.free(entry.key);
+        self.allocator.free(entry.value_json);
+    }
+
+    pub fn freeStoreEntries(self: *Self, entries: []StoreEntry) void {
+        for (entries) |entry| self.freeStoreEntry(entry);
+        self.allocator.free(entries);
+    }
+
     // ===== Helpers =====
 
     pub fn execSimple(self: *Self, sql: [*:0]const u8) !void {
@@ -1922,3 +2050,50 @@ pub const Store = struct {
         return self.colTextNullable(stmt, 0);
     }
 };
+
+test "store CRUD" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    // Put + Get
+    try store.storePut("ns1", "key1", "{\"x\":1}");
+    const entry = (try store.storeGet(alloc, "ns1", "key1")).?;
+    defer alloc.free(entry.namespace);
+    defer alloc.free(entry.key);
+    defer alloc.free(entry.value_json);
+    try std.testing.expectEqualStrings("{\"x\":1}", entry.value_json);
+
+    // Update
+    try store.storePut("ns1", "key1", "{\"x\":2}");
+    const entry2 = (try store.storeGet(alloc, "ns1", "key1")).?;
+    defer alloc.free(entry2.namespace);
+    defer alloc.free(entry2.key);
+    defer alloc.free(entry2.value_json);
+    try std.testing.expectEqualStrings("{\"x\":2}", entry2.value_json);
+
+    // List
+    const list = try store.storeList(alloc, "ns1");
+    defer {
+        for (list) |e| {
+            alloc.free(e.namespace);
+            alloc.free(e.key);
+            alloc.free(e.value_json);
+        }
+        alloc.free(list);
+    }
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+
+    // Delete
+    try store.storeDelete("ns1", "key1");
+    const gone = try store.storeGet(alloc, "ns1", "key1");
+    try std.testing.expect(gone == null);
+
+    // Delete namespace
+    try store.storePut("ns2", "a", "1");
+    try store.storePut("ns2", "b", "2");
+    try store.storeDeleteNamespace("ns2");
+    const ns2_list = try store.storeList(alloc, "ns2");
+    defer alloc.free(ns2_list);
+    try std.testing.expectEqual(@as(usize, 0), ns2_list.len);
+}

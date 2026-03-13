@@ -102,9 +102,10 @@ pub fn handleRequest(
 
     const is_get = std.mem.eql(u8, method, "GET");
     const is_post = std.mem.eql(u8, method, "POST");
+    const is_put = std.mem.eql(u8, method, "PUT");
     const is_delete = std.mem.eql(u8, method, "DELETE");
 
-    const is_write = is_post or is_delete;
+    const is_write = is_post or is_delete or is_put;
     const request_token = extractBearerToken(raw_request);
 
     if (!isAuthorized(ctx, seg0, seg1, seg2, request_token)) {
@@ -278,6 +279,30 @@ pub fn handleRequest(
     if (is_get and eql(seg0, "ops") and eql(seg1, "queue") and seg2 == null) {
         response = handleQueueOps(ctx, path.query);
         return response;
+    }
+
+    // Store (KV)
+    if (eql(seg0, "store") and seg1 != null) {
+        if (is_put and seg2 != null and seg3 == null) {
+            response = handleStorePut(ctx, seg1.?, seg2.?, body);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_get and seg2 != null and seg3 == null) {
+            response = handleStoreGet(ctx, seg1.?, seg2.?);
+            return response;
+        }
+        if (is_get and seg2 == null) {
+            response = handleStoreList(ctx, seg1.?);
+            return response;
+        }
+        if (is_delete and seg2 != null and seg3 == null) {
+            response = handleStoreDelete(ctx, seg1.?, seg2.?);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_delete and seg2 == null) {
+            response = handleStoreDeleteNamespace(ctx, seg1.?);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
     }
 
     return response;
@@ -829,6 +854,9 @@ fn handleClaim(ctx: *Context, body: []const u8) HttpResponse {
         agent_id: []const u8,
         agent_role: []const u8,
         lease_ttl_ms: ?i64 = null,
+        concurrency: ?struct {
+            per_state: ?std.json.Value = null,
+        } = null,
     }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
         return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
     };
@@ -836,7 +864,10 @@ fn handleClaim(ctx: *Context, body: []const u8) HttpResponse {
     const req = parsed.value;
     const ttl = req.lease_ttl_ms orelse 300_000; // 5 min default
 
-    const result = ctx.store.claimTask(req.agent_id, req.agent_role, ttl) catch |err| {
+    // Extract per_state concurrency map
+    const per_state_val: ?std.json.Value = if (req.concurrency) |conc| conc.per_state else null;
+
+    const result = ctx.store.claimTask(req.agent_id, req.agent_role, ttl, per_state_val) catch |err| {
         log.err("claim failed: {}", .{err});
         return serverError(ctx.allocator);
     };
@@ -1329,6 +1360,69 @@ fn writeRunFields(w: anytype, allocator: std.mem.Allocator, r: store_mod.RunRow)
     } else {
         try w.writeAll(",\"ended_at_ms\":null");
     }
+}
+
+// ===== Store handlers =====
+
+fn handleStorePut(ctx: *Context, namespace: []const u8, key: []const u8, body: []const u8) HttpResponse {
+    var parsed = std.json.parseFromSlice(struct {
+        value: std.json.Value,
+    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body; expected {\"value\": ...}");
+    };
+    defer parsed.deinit();
+    const value_json = jsonStringify(ctx.allocator, parsed.value.value) catch return serverError(ctx.allocator);
+
+    ctx.store.storePut(namespace, key, value_json) catch return serverError(ctx.allocator);
+    return .{ .status = "204 No Content", .body = "", .status_code = 204 };
+}
+
+fn handleStoreGet(ctx: *Context, namespace: []const u8, key: []const u8) HttpResponse {
+    const entry = ctx.store.storeGet(ctx.allocator, namespace, key) catch return serverError(ctx.allocator);
+    if (entry) |e| {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var w = buf.writer(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "namespace", e.namespace) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "key", e.key) catch return serverError(ctx.allocator);
+        w.print(",\"value\":{s}", .{e.value_json}) catch return serverError(ctx.allocator);
+        w.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{ e.created_at_ms, e.updated_at_ms }) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+        return .{ .status = "200 OK", .body = buf.items };
+    } else {
+        return respondError(ctx.allocator, 404, "not_found", "Key not found");
+    }
+}
+
+fn handleStoreList(ctx: *Context, namespace: []const u8) HttpResponse {
+    const entries = ctx.store.storeList(ctx.allocator, namespace) catch return serverError(ctx.allocator);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(ctx.allocator);
+    w.writeAll("[") catch return serverError(ctx.allocator);
+    for (entries, 0..) |e, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "namespace", e.namespace) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "key", e.key) catch return serverError(ctx.allocator);
+        w.print(",\"value\":{s}", .{e.value_json}) catch return serverError(ctx.allocator);
+        w.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{ e.created_at_ms, e.updated_at_ms }) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]") catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = buf.items };
+}
+
+fn handleStoreDelete(ctx: *Context, namespace: []const u8, key: []const u8) HttpResponse {
+    ctx.store.storeDelete(namespace, key) catch return serverError(ctx.allocator);
+    return .{ .status = "204 No Content", .body = "", .status_code = 204 };
+}
+
+fn handleStoreDeleteNamespace(ctx: *Context, namespace: []const u8) HttpResponse {
+    ctx.store.storeDeleteNamespace(namespace) catch return serverError(ctx.allocator);
+    return .{ .status = "204 No Content", .body = "", .status_code = 204 };
 }
 
 fn jsonStringify(allocator: std.mem.Allocator, value: std.json.Value) ![]const u8 {
