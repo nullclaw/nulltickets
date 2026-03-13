@@ -274,6 +274,20 @@ pub const Store = struct {
                 return error.MigrationFailed;
             }
         }
+
+        // Migration 004: store FTS5 full-text search
+        {
+            const fts_sql = @embedFile("migrations/004_store_fts.sql");
+            var fts_err: [*c]u8 = null;
+            const fts_rc = c.sqlite3_exec(self.db, fts_sql.ptr, null, null, &fts_err);
+            if (fts_rc != c.SQLITE_OK) {
+                if (fts_err) |msg| {
+                    log.err("migration 004 failed (rc={d}): {s}", .{ fts_rc, std.mem.span(msg) });
+                    c.sqlite3_free(msg);
+                }
+                return error.MigrationFailed;
+            }
+        }
     }
 
     fn ensureColumn(self: *Self, table_name: []const u8, column_name: []const u8, alter_sql: [*:0]const u8) !void {
@@ -1898,6 +1912,63 @@ pub const Store = struct {
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.DeleteFailed;
     }
 
+    pub fn storeSearch(
+        self: *Self,
+        alloc: std.mem.Allocator,
+        namespace: ?[]const u8,
+        query: []const u8,
+        limit: usize,
+        filter_path: ?[]const u8,
+        filter_value: ?[]const u8,
+    ) ![]StoreEntry {
+        const sql =
+            "SELECT s.namespace, s.key, s.value_json, s.created_at_ms, s.updated_at_ms " ++
+            "FROM store s " ++
+            "JOIN store_fts f ON s.rowid = f.rowid " ++
+            "WHERE store_fts MATCH ? " ++
+            "AND (? IS NULL OR s.namespace = ?) " ++
+            "AND (? IS NULL OR json_extract(s.value_json, ?) = ?) " ++
+            "ORDER BY rank " ++
+            "LIMIT ?;";
+        const stmt = try self.prepare(sql);
+        defer _ = c.sqlite3_finalize(stmt);
+
+        self.bindText(stmt, 1, query);
+        if (namespace) |ns| {
+            self.bindText(stmt, 2, ns);
+            self.bindText(stmt, 3, ns);
+        } else {
+            _ = c.sqlite3_bind_null(stmt, 2);
+            _ = c.sqlite3_bind_null(stmt, 3);
+        }
+        if (filter_path) |fp| {
+            self.bindText(stmt, 4, fp);
+            self.bindText(stmt, 5, fp);
+            if (filter_value) |fv| {
+                self.bindText(stmt, 6, fv);
+            } else {
+                _ = c.sqlite3_bind_null(stmt, 6);
+            }
+        } else {
+            _ = c.sqlite3_bind_null(stmt, 4);
+            _ = c.sqlite3_bind_null(stmt, 5);
+            _ = c.sqlite3_bind_null(stmt, 6);
+        }
+        _ = c.sqlite3_bind_int64(stmt, 7, @intCast(limit));
+
+        var results: std.ArrayListUnmanaged(StoreEntry) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try results.append(alloc, .{
+                .namespace = try alloc.dupe(u8, self.colTextView(stmt, 0)),
+                .key = try alloc.dupe(u8, self.colTextView(stmt, 1)),
+                .value_json = try alloc.dupe(u8, self.colTextView(stmt, 2)),
+                .created_at_ms = c.sqlite3_column_int64(stmt, 3),
+                .updated_at_ms = c.sqlite3_column_int64(stmt, 4),
+            });
+        }
+        return results.toOwnedSlice(alloc);
+    }
+
     pub fn storeDeleteNamespace(self: *Self, namespace: []const u8) !void {
         const stmt = try self.prepare("DELETE FROM store WHERE namespace = ?;");
         defer _ = c.sqlite3_finalize(stmt);
@@ -2096,4 +2167,45 @@ test "store CRUD" {
     const ns2_list = try store.storeList(alloc, "ns2");
     defer alloc.free(ns2_list);
     try std.testing.expectEqual(@as(usize, 0), ns2_list.len);
+}
+
+test "store search" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    try store.storePut("docs", "readme", "{\"title\":\"Getting Started\",\"body\":\"Welcome to the project\"}");
+    try store.storePut("docs", "api", "{\"title\":\"API Reference\",\"body\":\"Endpoints and methods\"}");
+    try store.storePut("notes", "todo", "{\"title\":\"Todo List\",\"body\":\"Fix bugs and add features\"}");
+
+    // Search across all namespaces
+    const results = try store.storeSearch(alloc, null, "endpoints methods", 10, null, null);
+    defer {
+        for (results) |e| {
+            alloc.free(e.namespace);
+            alloc.free(e.key);
+            alloc.free(e.value_json);
+        }
+        alloc.free(results);
+    }
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("api", results[0].key);
+
+    // Search with namespace filter
+    const ns_results = try store.storeSearch(alloc, "notes", "bugs features", 10, null, null);
+    defer {
+        for (ns_results) |e| {
+            alloc.free(e.namespace);
+            alloc.free(e.key);
+            alloc.free(e.value_json);
+        }
+        alloc.free(ns_results);
+    }
+    try std.testing.expectEqual(@as(usize, 1), ns_results.len);
+    try std.testing.expectEqualStrings("todo", ns_results[0].key);
+
+    // Search with no results
+    const empty_results = try store.storeSearch(alloc, null, "nonexistent_xyz", 10, null, null);
+    defer alloc.free(empty_results);
+    try std.testing.expectEqual(@as(usize, 0), empty_results.len);
 }

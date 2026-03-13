@@ -283,6 +283,10 @@ pub fn handleRequest(
 
     // Store (KV)
     if (eql(seg0, "store") and seg1 != null) {
+        if (is_get and eql(seg1, "search") and seg2 == null) {
+            response = handleStoreSearch(ctx, path.query);
+            return response;
+        }
         if (is_put and seg2 != null and seg3 == null) {
             response = handleStorePut(ctx, seg1.?, seg2.?, body);
             return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
@@ -1423,6 +1427,35 @@ fn handleStoreDelete(ctx: *Context, namespace: []const u8, key: []const u8) Http
 fn handleStoreDeleteNamespace(ctx: *Context, namespace: []const u8) HttpResponse {
     ctx.store.storeDeleteNamespace(namespace) catch return serverError(ctx.allocator);
     return .{ .status = "204 No Content", .body = "", .status_code = 204 };
+}
+
+fn handleStoreSearch(ctx: *Context, query: ?[]const u8) HttpResponse {
+    const q = parseQueryParam(query, "q") orelse {
+        return respondError(ctx.allocator, 400, "missing_param", "Query parameter 'q' is required");
+    };
+    const namespace = parseQueryParam(query, "namespace");
+    const limit_str = parseQueryParam(query, "limit");
+    const limit: usize = if (limit_str) |ls| (std.fmt.parseInt(usize, ls, 10) catch 10) else 10;
+    const filter_path = parseQueryParam(query, "filter_path");
+    const filter_value = parseQueryParam(query, "filter_value");
+
+    const entries = ctx.store.storeSearch(ctx.allocator, namespace, q, limit, filter_path, filter_value) catch return serverError(ctx.allocator);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(ctx.allocator);
+    w.writeAll("[") catch return serverError(ctx.allocator);
+    for (entries, 0..) |e, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "namespace", e.namespace) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "key", e.key) catch return serverError(ctx.allocator);
+        w.print(",\"value\":{s}", .{e.value_json}) catch return serverError(ctx.allocator);
+        w.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{ e.created_at_ms, e.updated_at_ms }) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]") catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = buf.items };
 }
 
 fn jsonStringify(allocator: std.mem.Allocator, value: std.json.Value) ![]const u8 {
