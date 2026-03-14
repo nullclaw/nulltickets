@@ -164,6 +164,36 @@ pub const TaskDetails = struct {
     available_transitions: []TaskTransition,
 };
 
+const PipelineDefinitionView = struct {
+    parsed: domain.ParsedPipeline,
+
+    fn init(allocator: std.mem.Allocator, definition_json: []const u8) !PipelineDefinitionView {
+        return .{
+            .parsed = try domain.parseAndValidate(allocator, definition_json),
+        };
+    }
+
+    fn deinit(self: *PipelineDefinitionView) void {
+        self.parsed.deinit();
+    }
+
+    fn definition(self: PipelineDefinitionView) domain.PipelineDefinition {
+        return self.parsed.value;
+    }
+
+    fn isTerminal(self: PipelineDefinitionView, stage: []const u8) bool {
+        return domain.isTerminal(self.definition(), stage);
+    }
+
+    fn findTransition(self: PipelineDefinitionView, from_stage: []const u8, trigger: []const u8) ?domain.TransitionDef {
+        return domain.findTransition(self.definition(), from_stage, trigger);
+    }
+
+    fn hasState(self: PipelineDefinitionView, stage: []const u8) bool {
+        return self.definition().states.map.contains(stage);
+    }
+};
+
 pub const OtlpSpanInsert = struct {
     trace_id: []const u8,
     span_id: []const u8,
@@ -485,9 +515,9 @@ pub const Store = struct {
 
         var parse_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer parse_arena.deinit();
-        var parsed = domain.parseAndValidate(parse_arena.allocator(), pipeline.definition_json) catch return error.InvalidPipeline;
-        defer parsed.deinit();
-        const def = parsed.value;
+        var pipeline_def = PipelineDefinitionView.init(parse_arena.allocator(), pipeline.definition_json) catch return error.InvalidPipeline;
+        defer pipeline_def.deinit();
+        const def = pipeline_def.definition();
 
         const id_arr = ids.generateId();
         const id = try self.allocator.dupe(u8, &id_arr);
@@ -607,11 +637,11 @@ pub const Store = struct {
             const dep_id = self.colTextView(stmt, 0);
             const dep_stage = self.colTextView(stmt, 1);
             const dep_def_json = self.colTextView(stmt, 2);
-            var parsed = domain.parseAndValidate(temp_alloc, dep_def_json) catch return error.InvalidPipeline;
-            defer parsed.deinit();
+            var pipeline_def = PipelineDefinitionView.init(temp_alloc, dep_def_json) catch return error.InvalidPipeline;
+            defer pipeline_def.deinit();
             try results.append(self.allocator, .{
                 .depends_on_task_id = try self.allocator.dupe(u8, dep_id),
-                .resolved = domain.isTerminal(parsed.value, dep_stage),
+                .resolved = pipeline_def.isTerminal(dep_stage),
             });
         }
         return results.toOwnedSlice(self.allocator);
@@ -677,17 +707,17 @@ pub const Store = struct {
         const pipeline = (try self.getPipeline(pipeline_id)) orelse return self.allocator.alloc(TaskTransition, 0);
         defer self.freePipelineRow(pipeline);
 
-        var parsed = domain.parseAndValidate(self.allocator, pipeline.definition_json) catch {
+        var pipeline_def = PipelineDefinitionView.init(self.allocator, pipeline.definition_json) catch {
             return self.allocator.alloc(TaskTransition, 0);
         };
-        defer parsed.deinit();
+        defer pipeline_def.deinit();
 
         var results: std.ArrayListUnmanaged(TaskTransition) = .empty;
         errdefer {
             for (results.items) |transition| self.freeTaskTransition(transition);
             results.deinit(self.allocator);
         }
-        for (parsed.value.transitions) |transition| {
+        for (pipeline_def.definition().transitions) |transition| {
             if (!std.mem.eql(u8, transition.from, stage)) continue;
             try results.append(self.allocator, try self.dupeTaskTransition(transition));
         }
@@ -1087,9 +1117,9 @@ pub const Store = struct {
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             const dep_stage = self.colTextView(stmt, 0);
             const def_json = self.colTextView(stmt, 1);
-            var parsed = domain.parseAndValidate(temp_alloc, def_json) catch return false;
-            defer parsed.deinit();
-            if (!domain.isTerminal(parsed.value, dep_stage)) return false;
+            var pipeline_def = PipelineDefinitionView.init(temp_alloc, def_json) catch return false;
+            defer pipeline_def.deinit();
+            if (!pipeline_def.isTerminal(dep_stage)) return false;
         }
 
         return true;
@@ -1210,9 +1240,9 @@ pub const Store = struct {
         if (c.sqlite3_step(pip_stmt) != c.SQLITE_ROW) return error.PipelineNotFound;
         const def_json = self.colTextView(pip_stmt, 0);
 
-        var parsed = domain.parseAndValidate(temp_alloc, def_json) catch return error.InvalidPipeline;
-        defer parsed.deinit();
-        const transition = domain.findTransition(parsed.value, current_stage, trigger) orelse return error.InvalidTransition;
+        var pipeline_def = PipelineDefinitionView.init(temp_alloc, def_json) catch return error.InvalidPipeline;
+        defer pipeline_def.deinit();
+        const transition = pipeline_def.findTransition(current_stage, trigger) orelse return error.InvalidTransition;
 
         // Update run
         {
@@ -1335,11 +1365,11 @@ pub const Store = struct {
                     self.bindText(pip_stmt, 1, pipeline_id);
                     if (c.sqlite3_step(pip_stmt) == c.SQLITE_ROW) {
                         const def_json = self.colTextView(pip_stmt, 0);
-                        const parsed = domain.parseAndValidate(temp_alloc, def_json) catch null;
+                        const parsed = PipelineDefinitionView.init(temp_alloc, def_json) catch null;
                         if (parsed) |parsed_value| {
-                            var p = parsed_value;
-                            defer p.deinit();
-                            if (p.value.states.map.contains(candidate)) {
+                            var pipeline_def = parsed_value;
+                            defer pipeline_def.deinit();
+                            if (pipeline_def.hasState(candidate)) {
                                 dead_stage_to_use = candidate;
                             }
                         }
@@ -1740,12 +1770,12 @@ pub const Store = struct {
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
             const pipeline_id = self.colTextView(stmt, 0);
             const definition_json = self.colTextView(stmt, 1);
-            var parsed = domain.parseAndValidate(temp_alloc, definition_json) catch {
+            var pipeline_def = PipelineDefinitionView.init(temp_alloc, definition_json) catch {
                 log.warn("skipping pipeline role index rebuild for invalid pipeline {s}", .{pipeline_id});
                 continue;
             };
-            defer parsed.deinit();
-            try self.replacePipelineStageRoles(pipeline_id, parsed.value);
+            defer pipeline_def.deinit();
+            try self.replacePipelineStageRoles(pipeline_id, pipeline_def.definition());
         }
     }
 
