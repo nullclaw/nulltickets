@@ -1741,7 +1741,7 @@ pub const Store = struct {
     pub fn storePut(self: *Self, namespace: []const u8, key: []const u8, value_json: []const u8) !void {
         const now_ms = ids.nowMs();
         const stmt = try self.prepare(
-            "INSERT OR REPLACE INTO store (namespace, key, value_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?);",
+            "INSERT INTO store (namespace, key, value_json, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?) ON CONFLICT(namespace, key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms;",
         );
         defer _ = c.sqlite3_finalize(stmt);
         self.bindText(stmt, 1, namespace);
@@ -2017,13 +2017,15 @@ test "store CRUD" {
     defer alloc.free(entry.value_json);
     try std.testing.expectEqualStrings("{\"x\":1}", entry.value_json);
 
-    // Update
+    // Update (upsert preserves created_at_ms)
     try store.storePut("ns1", "key1", "{\"x\":2}");
     const entry2 = (try store.storeGet(alloc, "ns1", "key1")).?;
     defer alloc.free(entry2.namespace);
     defer alloc.free(entry2.key);
     defer alloc.free(entry2.value_json);
     try std.testing.expectEqualStrings("{\"x\":2}", entry2.value_json);
+    try std.testing.expectEqual(entry.created_at_ms, entry2.created_at_ms);
+    try std.testing.expect(entry2.updated_at_ms >= entry.updated_at_ms);
 
     // List
     const list = try store.storeList(alloc, "ns1");
