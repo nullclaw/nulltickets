@@ -112,19 +112,6 @@ pub fn getAvailableTransitions(allocator: std.mem.Allocator, def: PipelineDefini
     return results.toOwnedSlice(allocator);
 }
 
-pub fn getStagesForRole(allocator: std.mem.Allocator, def: PipelineDefinition, role: []const u8) ![]const []const u8 {
-    var stages: std.ArrayListUnmanaged([]const u8) = .empty;
-    var iter = def.states.map.iterator();
-    while (iter.next()) |entry| {
-        if (entry.value_ptr.agent_role) |agent_role| {
-            if (std.mem.eql(u8, agent_role, role)) {
-                try stages.append(allocator, try allocator.dupe(u8, entry.key_ptr.*));
-            }
-        }
-    }
-    return stages.toOwnedSlice(allocator);
-}
-
 pub fn validationErrorMessage(err: ValidationError) []const u8 {
     return switch (err) {
         ValidationError.InvalidJson => "Invalid JSON in pipeline definition",

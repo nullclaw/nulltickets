@@ -115,6 +115,12 @@ pub const QueueRoleStats = struct {
     near_expiry_leases: i64,
 };
 
+const PipelineStageRoleRow = struct {
+    pipeline_id: []const u8,
+    stage: []const u8,
+    agent_role: []const u8,
+};
+
 pub const TaskPage = struct {
     items: []TaskRow,
     next_cursor: ?[]const u8,
@@ -836,26 +842,10 @@ pub const Store = struct {
             }
         }
 
-        const RoleStage = struct {
-            pipeline_id: []const u8,
-            stage: []const u8,
-        };
-
         // Find pipeline+stage pairs matching this role.
-        var role_stages: std.ArrayListUnmanaged(RoleStage) = .empty;
-        {
-            const pstmt = try self.prepare("SELECT pipeline_id, stage FROM pipeline_stage_roles WHERE agent_role = ? ORDER BY pipeline_id, stage;");
-            defer _ = c.sqlite3_finalize(pstmt);
-            self.bindText(pstmt, 1, agent_role);
-            while (c.sqlite3_step(pstmt) == c.SQLITE_ROW) {
-                try role_stages.append(temp_alloc, .{
-                    .pipeline_id = try temp_alloc.dupe(u8, self.colTextView(pstmt, 0)),
-                    .stage = try temp_alloc.dupe(u8, self.colTextView(pstmt, 1)),
-                });
-            }
-        }
+        const role_stages = try self.listPipelineStageRoles(temp_alloc, agent_role);
 
-        if (role_stages.items.len == 0) {
+        if (role_stages.len == 0) {
             try self.execSimple("COMMIT;");
             return null;
         }
@@ -865,7 +855,7 @@ pub const Store = struct {
         const find_sql = "SELECT t.id, t.pipeline_id, t.stage, t.title, t.description, t.priority, t.metadata_json, t.task_version, t.next_eligible_at_ms, t.max_attempts, t.retry_delay_ms, t.dead_letter_stage, t.dead_letter_reason, t.created_at_ms, t.updated_at_ms FROM tasks t WHERE t.pipeline_id = ? AND t.stage = ? AND t.dead_letter_reason IS NULL AND t.next_eligible_at_ms <= ? AND NOT EXISTS (SELECT 1 FROM leases l JOIN runs r ON l.run_id = r.id WHERE r.task_id = t.id AND l.expires_at_ms > ?) ORDER BY t.priority DESC, t.created_at_ms ASC LIMIT 20;";
         const fstmt = try self.prepare(find_sql);
         defer _ = c.sqlite3_finalize(fstmt);
-        for (role_stages.items) |role_stage| {
+        for (role_stages) |role_stage| {
             _ = c.sqlite3_reset(fstmt);
             _ = c.sqlite3_clear_bindings(fstmt);
             self.bindText(fstmt, 1, role_stage.pipeline_id);
@@ -1698,6 +1688,26 @@ pub const Store = struct {
         }
     }
 
+    fn listPipelineStageRoles(self: *Self, alloc: std.mem.Allocator, agent_role: ?[]const u8) ![]PipelineStageRoleRow {
+        const sql = if (agent_role == null)
+            "SELECT pipeline_id, stage, agent_role FROM pipeline_stage_roles ORDER BY pipeline_id, stage;"
+        else
+            "SELECT pipeline_id, stage, agent_role FROM pipeline_stage_roles WHERE agent_role = ? ORDER BY pipeline_id, stage;";
+        const stmt = try self.prepare(sql);
+        defer _ = c.sqlite3_finalize(stmt);
+        if (agent_role) |role| self.bindText(stmt, 1, role);
+
+        var rows: std.ArrayListUnmanaged(PipelineStageRoleRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try rows.append(alloc, .{
+                .pipeline_id = try alloc.dupe(u8, self.colTextView(stmt, 0)),
+                .stage = try alloc.dupe(u8, self.colTextView(stmt, 1)),
+                .agent_role = try alloc.dupe(u8, self.colTextView(stmt, 2)),
+            });
+        }
+        return rows.toOwnedSlice(alloc);
+    }
+
     pub fn getIdempotency(self: *Self, key: []const u8, method: []const u8, path: []const u8) !?IdempotencyRow {
         const stmt = try self.prepare("SELECT request_hash, response_status, response_body, created_at_ms FROM idempotency_keys WHERE key = ? AND method = ? AND path = ?;");
         defer _ = c.sqlite3_finalize(stmt);
@@ -1737,23 +1747,22 @@ pub const Store = struct {
     }
 
     pub fn getQueueRoleStats(self: *Self, near_expiry_window_ms: i64, stuck_window_ms: i64) ![]QueueRoleStats {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const temp_alloc = scratch.allocator();
+
         var roles: std.ArrayListUnmanaged(QueueRoleStats) = .empty;
         const now_ms = ids.nowMs();
-
-        const pipelines_stmt = try self.prepare("SELECT pipeline_id, stage, agent_role FROM pipeline_stage_roles ORDER BY pipeline_id, stage;");
-        defer _ = c.sqlite3_finalize(pipelines_stmt);
-        while (c.sqlite3_step(pipelines_stmt) == c.SQLITE_ROW) {
-            const pipeline_id = self.colTextView(pipelines_stmt, 0);
-            const stage = self.colTextView(pipelines_stmt, 1);
-            const role = self.colTextView(pipelines_stmt, 2);
-            const idx = try self.ensureRoleStatsIndex(&roles, role);
+        const role_stages = try self.listPipelineStageRoles(temp_alloc, null);
+        for (role_stages) |role_stage| {
+            const idx = try self.ensureRoleStatsIndex(&roles, role_stage.agent_role);
 
             const claimable_stmt = try self.prepare(
                 "SELECT t.id, t.created_at_ms FROM tasks t WHERE t.pipeline_id = ? AND t.stage = ? AND t.dead_letter_reason IS NULL AND t.next_eligible_at_ms <= ? AND NOT EXISTS (SELECT 1 FROM leases l JOIN runs r ON l.run_id = r.id WHERE r.task_id = t.id AND l.expires_at_ms > ?) ORDER BY t.created_at_ms ASC;",
             );
             defer _ = c.sqlite3_finalize(claimable_stmt);
-            self.bindText(claimable_stmt, 1, pipeline_id);
-            self.bindText(claimable_stmt, 2, stage);
+            self.bindText(claimable_stmt, 1, role_stage.pipeline_id);
+            self.bindText(claimable_stmt, 2, role_stage.stage);
             _ = c.sqlite3_bind_int64(claimable_stmt, 3, now_ms);
             _ = c.sqlite3_bind_int64(claimable_stmt, 4, now_ms);
             while (c.sqlite3_step(claimable_stmt) == c.SQLITE_ROW) {
@@ -1769,8 +1778,8 @@ pub const Store = struct {
 
             const failed_stmt = try self.prepare("SELECT COUNT(*) FROM runs r JOIN tasks t ON t.id = r.task_id WHERE t.pipeline_id = ? AND t.stage = ? AND r.status = 'failed';");
             defer _ = c.sqlite3_finalize(failed_stmt);
-            self.bindText(failed_stmt, 1, pipeline_id);
-            self.bindText(failed_stmt, 2, stage);
+            self.bindText(failed_stmt, 1, role_stage.pipeline_id);
+            self.bindText(failed_stmt, 2, role_stage.stage);
             if (c.sqlite3_step(failed_stmt) == c.SQLITE_ROW) {
                 roles.items[idx].failed_count += c.sqlite3_column_int64(failed_stmt, 0);
             }
@@ -1779,8 +1788,8 @@ pub const Store = struct {
                 "SELECT COUNT(*) FROM runs r JOIN tasks t ON t.id = r.task_id WHERE t.pipeline_id = ? AND t.stage = ? AND r.status = 'running' AND r.started_at_ms <= ?;",
             );
             defer _ = c.sqlite3_finalize(stuck_stmt);
-            self.bindText(stuck_stmt, 1, pipeline_id);
-            self.bindText(stuck_stmt, 2, stage);
+            self.bindText(stuck_stmt, 1, role_stage.pipeline_id);
+            self.bindText(stuck_stmt, 2, role_stage.stage);
             _ = c.sqlite3_bind_int64(stuck_stmt, 3, now_ms - stuck_window_ms);
             if (c.sqlite3_step(stuck_stmt) == c.SQLITE_ROW) {
                 roles.items[idx].stuck_count += c.sqlite3_column_int64(stuck_stmt, 0);
@@ -1790,8 +1799,8 @@ pub const Store = struct {
                 "SELECT COUNT(*) FROM leases l JOIN runs r ON r.id = l.run_id JOIN tasks t ON t.id = r.task_id WHERE t.pipeline_id = ? AND t.stage = ? AND l.expires_at_ms > ? AND l.expires_at_ms <= ?;",
             );
             defer _ = c.sqlite3_finalize(lease_stmt);
-            self.bindText(lease_stmt, 1, pipeline_id);
-            self.bindText(lease_stmt, 2, stage);
+            self.bindText(lease_stmt, 1, role_stage.pipeline_id);
+            self.bindText(lease_stmt, 2, role_stage.stage);
             _ = c.sqlite3_bind_int64(lease_stmt, 3, now_ms);
             _ = c.sqlite3_bind_int64(lease_stmt, 4, now_ms + near_expiry_window_ms);
             if (c.sqlite3_step(lease_stmt) == c.SQLITE_ROW) {
