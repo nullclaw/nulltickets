@@ -1469,6 +1469,9 @@ fn handleStoreSearch(ctx: *Context, query: ?[]const u8) HttpResponse {
     const namespace = decodeQueryParamValue(ctx.allocator, parseQueryParam(query, "namespace"));
     const limit_str = parseQueryParam(query, "limit");
     const limit: usize = if (limit_str) |ls| (std.fmt.parseInt(usize, ls, 10) catch 10) else 10;
+    if (limit == 0 or limit > 1000) {
+        return respondError(ctx.allocator, 400, "invalid_limit", "limit must be between 1 and 1000");
+    }
     const filter_path = decodeQueryParamValue(ctx.allocator, parseQueryParam(query, "filter_path"));
     const filter_value = decodeQueryParamValue(ctx.allocator, parseQueryParam(query, "filter_value"));
 
@@ -1809,4 +1812,28 @@ test "store search decodes namespace and filter query params" {
     );
     try std.testing.expectEqualStrings("200 OK", search_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, search_resp.body, "\"key\":\"key/1\"") != null);
+}
+
+test "store search rejects excessive limit" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const resp = handleRequest(
+        &ctx,
+        "GET",
+        "/store/search?q=hello&limit=1001",
+        "",
+        "GET /store/search?q=hello&limit=1001 HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"invalid_limit\"") != null);
 }
