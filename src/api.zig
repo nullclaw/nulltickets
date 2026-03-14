@@ -1236,7 +1236,7 @@ fn handleUnassignTask(ctx: *Context, task_id: []const u8, agent_id: []const u8) 
 fn handleGetTaskRunState(ctx: *Context, task_id: []const u8) HttpResponse {
     const run_id = ctx.store.getTaskRunId(task_id) catch return serverError(ctx.allocator);
     if (run_id) |rid| {
-        defer ctx.allocator.free(rid);
+        defer ctx.store.freeOwnedString(rid);
         const resp = std.fmt.allocPrint(ctx.allocator, "{{\"run_id\":\"{s}\"}}", .{rid}) catch return serverError(ctx.allocator);
         return .{ .status = "200 OK", .body = resp };
     }
