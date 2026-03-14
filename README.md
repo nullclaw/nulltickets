@@ -87,10 +87,9 @@ bash tests/test_e2e.sh
 
 - `src/main.zig` - process entrypoint, argument parsing, socket accept loop
 - `src/api.zig` - HTTP routing, request validation, response serialization
-- `src/store.zig` - SQLite queries, transactions, ownership/free helpers
+- `src/store.zig` - SQLite queries, transactions, migrations, ownership/free helpers
 - `src/domain.zig` - pipeline FSM parsing and validation
 - `src/ids.zig` - UUID/token/hash/time helpers
-- `src/types.zig` - shared JSON response structs
 - `src/config.zig` - config loading and resolution
 - `src/migrations/001_init.sql` - database schema
 - `src/migrations/003_store.sql` - KV store table
