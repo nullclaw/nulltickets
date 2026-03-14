@@ -94,11 +94,11 @@ pub fn handleRequest(
     raw_request: []const u8,
 ) HttpResponse {
     const path = parsePath(target);
-    const seg0 = getPathSegment(path.path, 0);
-    const seg1 = getPathSegment(path.path, 1);
-    const seg2 = getPathSegment(path.path, 2);
-    const seg3 = getPathSegment(path.path, 3);
-    const seg4 = getPathSegment(path.path, 4);
+    const seg0 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 0));
+    const seg1 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 1));
+    const seg2 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 2));
+    const seg3 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 3));
+    const seg4 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 4));
 
     const is_get = std.mem.eql(u8, method, "GET");
     const is_post = std.mem.eql(u8, method, "POST");
@@ -1466,11 +1466,11 @@ fn handleStoreSearch(ctx: *Context, query: ?[]const u8) HttpResponse {
     const sanitized = sanitizeFts5Query(ctx.allocator, q) orelse {
         return respondError(ctx.allocator, 400, "invalid_query", "Search query must contain at least one non-whitespace term");
     };
-    const namespace = parseQueryParam(query, "namespace");
+    const namespace = decodeQueryParamValue(ctx.allocator, parseQueryParam(query, "namespace"));
     const limit_str = parseQueryParam(query, "limit");
     const limit: usize = if (limit_str) |ls| (std.fmt.parseInt(usize, ls, 10) catch 10) else 10;
-    const filter_path = parseQueryParam(query, "filter_path");
-    const filter_value = parseQueryParam(query, "filter_value");
+    const filter_path = decodeQueryParamValue(ctx.allocator, parseQueryParam(query, "filter_path"));
+    const filter_value = decodeQueryParamValue(ctx.allocator, parseQueryParam(query, "filter_value"));
 
     const entries = ctx.store.storeSearch(ctx.allocator, namespace, sanitized, limit, filter_path, filter_value) catch return serverError(ctx.allocator);
 
@@ -1533,13 +1533,31 @@ pub fn parseQueryParam(query: ?[]const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+fn decodePathSegment(allocator: std.mem.Allocator, segment: ?[]const u8) ?[]const u8 {
+    const raw = segment orelse return null;
+    if (std.mem.indexOfScalar(u8, raw, '%') == null) return raw;
+    return decodeComponent(allocator, raw, false) orelse raw;
+}
+
+fn decodeQueryParamValue(allocator: std.mem.Allocator, value: ?[]const u8) ?[]const u8 {
+    const raw = value orelse return null;
+    return urlDecode(allocator, raw) orelse raw;
+}
+
 /// URL-decode a query parameter value: decode %XX sequences and replace '+' with space.
 pub fn urlDecode(allocator: std.mem.Allocator, input: []const u8) ?[]const u8 {
+    return decodeComponent(allocator, input, true);
+}
+
+fn decodeComponent(allocator: std.mem.Allocator, input: []const u8, plus_as_space: bool) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, input, '%') == null and (!plus_as_space or std.mem.indexOfScalar(u8, input, '+') == null)) {
+        return input;
+    }
     var buf = allocator.alloc(u8, input.len) catch return null;
     var out: usize = 0;
     var i: usize = 0;
     while (i < input.len) {
-        if (input[i] == '+') {
+        if (plus_as_space and input[i] == '+') {
             buf[out] = ' ';
             out += 1;
             i += 1;
@@ -1724,4 +1742,71 @@ test "auth accepts admin token for protected endpoint" {
         "Authorization: Bearer secret\r\n\r\n";
     const resp = handleRequest(&ctx, "GET", "/tasks", "", raw);
     try std.testing.expectEqualStrings("200 OK", resp.status);
+}
+
+test "store API decodes percent-encoded namespace and key segments" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const put_resp = handleRequest(
+        &ctx,
+        "PUT",
+        "/store/team%20alpha/key%2F1",
+        "{\"value\":{\"message\":\"hello\"}}",
+        "PUT /store/team%20alpha/key%2F1 HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("204 No Content", put_resp.status);
+
+    const get_resp = handleRequest(
+        &ctx,
+        "GET",
+        "/store/team%20alpha/key%2F1",
+        "",
+        "GET /store/team%20alpha/key%2F1 HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("200 OK", get_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, get_resp.body, "\"namespace\":\"team alpha\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, get_resp.body, "\"key\":\"key/1\"") != null);
+}
+
+test "store search decodes namespace and filter query params" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const put_resp = handleRequest(
+        &ctx,
+        "PUT",
+        "/store/team%20alpha/key%2F1",
+        "{\"value\":{\"message\":\"hello world\",\"status\":\"release candidate\"}}",
+        "PUT /store/team%20alpha/key%2F1 HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("204 No Content", put_resp.status);
+
+    const search_resp = handleRequest(
+        &ctx,
+        "GET",
+        "/store/search?q=hello&namespace=team%20alpha&filter_path=%24.status&filter_value=release+candidate",
+        "",
+        "GET /store/search?q=hello&namespace=team%20alpha&filter_path=%24.status&filter_value=release+candidate HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("200 OK", search_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, search_resp.body, "\"key\":\"key/1\"") != null);
 }
