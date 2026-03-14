@@ -764,7 +764,17 @@
         "properties": {
           "agent_id": { "type": "string" },
           "agent_role": { "type": "string" },
-          "lease_ttl_ms": { "type": "integer" }
+          "lease_ttl_ms": { "type": "integer" },
+          "concurrency": {
+            "type": ["object", "null"],
+            "properties": {
+              "per_state": {
+                "type": ["object", "null"],
+                "description": "Map of state name to max concurrent leased tasks",
+                "additionalProperties": { "type": "integer" }
+              }
+            }
+          }
         }
       },
       "ClaimResponse": {
