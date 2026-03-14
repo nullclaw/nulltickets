@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
     });
     lib.root_module.addCSourceFile(.{
         .file = b.path("sqlite3.c"),
+        .flags = &.{"-DSQLITE_ENABLE_FTS5"},
     });
     lib.installHeader(b.path("sqlite3.h"), "sqlite3.h");
     lib.installHeader(b.path("sqlite3ext.h"), "sqlite3ext.h");
