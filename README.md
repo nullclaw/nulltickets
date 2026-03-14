@@ -134,7 +134,13 @@ bash tests/test_e2e.sh
 | `DELETE` | `/store/{namespace}/{key}` | Delete KV store entry |
 | `GET` | `/store/{namespace}` | List entries in namespace |
 | `DELETE` | `/store/{namespace}` | Delete all entries in namespace |
-| `GET` | `/store/search?q=&namespace=&limit=` | Full-text search store |
+| `GET` | `/store/search?q=&namespace=&limit=&filter_path=&filter_value=` | Full-text search store |
+
+### Store API Notes
+
+- Store path segments are URL-decoded by the server. Clients should percent-encode reserved characters in `namespace` and `key` (for example spaces or `/`).
+- The namespace name `search` is reserved for `GET /store/search` and cannot be listed via `GET /store/{namespace}`.
+- `GET /store/search` also supports exact JSON filtering with `filter_path` and `filter_value` in addition to FTS search.
 
 ## Agent Loop
 

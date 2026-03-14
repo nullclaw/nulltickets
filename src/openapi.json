@@ -433,9 +433,10 @@
     "/store/{namespace}/{key}": {
       "put": {
         "summary": "Put store entry",
+        "description": "Path segments are URL-decoded server-side. Percent-encode reserved characters such as spaces or '/'.",
         "parameters": [
-          { "name": "namespace", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } }
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } },
+          { "name": "key", "in": "path", "required": true, "description": "Store key. Reserved characters should be percent-encoded by the client.", "schema": { "type": "string" } }
         ],
         "requestBody": {
           "required": true,
@@ -448,8 +449,8 @@
       "get": {
         "summary": "Get store entry",
         "parameters": [
-          { "name": "namespace", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } }
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } },
+          { "name": "key", "in": "path", "required": true, "description": "Store key. Reserved characters should be percent-encoded by the client.", "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
@@ -462,8 +463,8 @@
       "delete": {
         "summary": "Delete store entry",
         "parameters": [
-          { "name": "namespace", "in": "path", "required": true, "schema": { "type": "string" } },
-          { "name": "key", "in": "path", "required": true, "schema": { "type": "string" } }
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } },
+          { "name": "key", "in": "path", "required": true, "description": "Store key. Reserved characters should be percent-encoded by the client.", "schema": { "type": "string" } }
         ],
         "responses": {
           "204": { "description": "Deleted" }
@@ -474,7 +475,7 @@
       "get": {
         "summary": "List store entries in namespace",
         "parameters": [
-          { "name": "namespace", "in": "path", "required": true, "schema": { "type": "string" } }
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
@@ -486,7 +487,7 @@
       "delete": {
         "summary": "Delete all entries in namespace",
         "parameters": [
-          { "name": "namespace", "in": "path", "required": true, "schema": { "type": "string" } }
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } }
         ],
         "responses": {
           "204": { "description": "Deleted" }
@@ -496,6 +497,7 @@
     "/store/search": {
       "get": {
         "summary": "Full-text search store entries",
+        "description": "Searches FTS5 content and can optionally narrow results with exact JSON filtering via filter_path/filter_value.",
         "parameters": [
           { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
           { "name": "namespace", "in": "query", "required": false, "schema": { "type": "string" } },

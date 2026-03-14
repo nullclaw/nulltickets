@@ -95,6 +95,12 @@ Transition returns `409` when:
 - `DELETE /store/{namespace}` (delete all entries in namespace)
 - `GET /store/search?q=&namespace=&limit=&filter_path=&filter_value=` (FTS5 full-text search)
 
+Notes:
+
+- `namespace` and `key` path segments are URL-decoded server-side, so clients should percent-encode reserved characters such as spaces or `/`.
+- `search` is a reserved namespace name because `GET /store/search` is the full-text search endpoint.
+- `filter_path` and `filter_value` apply an exact JSON filter on top of FTS results.
+
 ## Ops
 
 - `GET /ops/queue?near_expiry_ms=&stuck_ms=`
