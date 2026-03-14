@@ -1,7 +1,6 @@
 const std = @import("std");
 const store_mod = @import("store.zig");
 const Store = store_mod.Store;
-const domain = @import("domain.zig");
 const ids = @import("ids.zig");
 const log = std.log.scoped(.api);
 
@@ -94,17 +93,18 @@ pub fn handleRequest(
     raw_request: []const u8,
 ) HttpResponse {
     const path = parsePath(target);
-    const seg0 = getPathSegment(path.path, 0);
-    const seg1 = getPathSegment(path.path, 1);
-    const seg2 = getPathSegment(path.path, 2);
-    const seg3 = getPathSegment(path.path, 3);
-    const seg4 = getPathSegment(path.path, 4);
+    const seg0 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 0));
+    const seg1 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 1));
+    const seg2 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 2));
+    const seg3 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 3));
+    const seg4 = decodePathSegment(ctx.allocator, getPathSegment(path.path, 4));
 
     const is_get = std.mem.eql(u8, method, "GET");
     const is_post = std.mem.eql(u8, method, "POST");
+    const is_put = std.mem.eql(u8, method, "PUT");
     const is_delete = std.mem.eql(u8, method, "DELETE");
 
-    const is_write = is_post or is_delete;
+    const is_write = is_post or is_delete or is_put;
     const request_token = extractBearerToken(raw_request);
 
     if (!isAuthorized(ctx, seg0, seg1, seg2, request_token)) {
@@ -199,6 +199,11 @@ pub fn handleRequest(
             return response;
         }
 
+        if (is_get and seg1 != null and eql(seg2, "run-state") and seg3 == null) {
+            response = handleGetTaskRunState(ctx, seg1.?);
+            return response;
+        }
+
         if (seg1 != null and eql(seg2, "dependencies")) {
             if (is_post and seg3 == null) {
                 response = handleAddTaskDependency(ctx, seg1.?, body);
@@ -248,14 +253,6 @@ pub fn handleRequest(
             response = handleListEvents(ctx, seg1.?, path.query);
             return response;
         }
-        if (is_post and eql(seg2, "gates")) {
-            response = handleAddGateResult(ctx, seg1.?, body, raw_request);
-            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
-        }
-        if (is_get and eql(seg2, "gates")) {
-            response = handleListGateResults(ctx, seg1.?);
-            return response;
-        }
         if (is_post and eql(seg2, "transition")) {
             response = handleTransition(ctx, seg1.?, body, raw_request);
             return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
@@ -281,6 +278,36 @@ pub fn handleRequest(
     if (is_get and eql(seg0, "ops") and eql(seg1, "queue") and seg2 == null) {
         response = handleQueueOps(ctx, path.query);
         return response;
+    }
+
+    // Store (KV)
+    // NOTE: "search" is a reserved namespace — GET /store/search is the search endpoint,
+    // so a namespace literally named "search" cannot be listed via GET /store/{namespace}.
+    if (eql(seg0, "store") and seg1 != null) {
+        if (is_get and eql(seg1, "search") and seg2 == null) {
+            response = handleStoreSearch(ctx, path.query);
+            return response;
+        }
+        if (is_put and seg2 != null and seg3 == null) {
+            response = handleStorePut(ctx, seg1.?, seg2.?, body);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_get and seg2 != null and seg3 == null) {
+            response = handleStoreGet(ctx, seg1.?, seg2.?);
+            return response;
+        }
+        if (is_get and seg2 == null) {
+            response = handleStoreList(ctx, seg1.?);
+            return response;
+        }
+        if (is_delete and seg2 != null and seg3 == null) {
+            response = handleStoreDelete(ctx, seg1.?, seg2.?);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
+        if (is_delete and seg2 == null) {
+            response = handleStoreDeleteNamespace(ctx, seg1.?);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
     }
 
     return response;
@@ -736,92 +763,26 @@ fn handleListTasks(ctx: *Context, query: ?[]const u8) HttpResponse {
 }
 
 fn handleGetTask(ctx: *Context, id: []const u8) HttpResponse {
-    const task = (ctx.store.getTask(id) catch return serverError(ctx.allocator)) orelse {
+    const details = (ctx.store.getTaskDetails(id) catch return serverError(ctx.allocator)) orelse {
         return respondError(ctx.allocator, 404, "not_found", "Task not found");
     };
-    defer ctx.store.freeTaskRow(task);
-
-    // Get pipeline definition for available transitions
-    const pipeline = ctx.store.getPipeline(task.pipeline_id) catch null;
-    defer if (pipeline) |p| ctx.store.freePipelineRow(p);
-    const latest_run = ctx.store.getLatestRun(id) catch null;
-    defer if (latest_run) |r| ctx.store.freeRunRow(r);
-    const dependencies = ctx.store.listTaskDependencies(id) catch return serverError(ctx.allocator);
-    defer ctx.store.freeDependencyRows(dependencies);
-    const assignments = ctx.store.listTaskAssignments(id) catch return serverError(ctx.allocator);
-    defer ctx.store.freeAssignmentRows(assignments);
+    defer ctx.store.freeTaskDetails(details);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var w = buf.writer(ctx.allocator);
     w.writeAll("{") catch return serverError(ctx.allocator);
-    writeTaskJsonFields(&w, ctx.allocator, task) catch return serverError(ctx.allocator);
+    writeTaskJsonFields(&w, ctx.allocator, details.task) catch return serverError(ctx.allocator);
 
     // Latest run
-    if (latest_run) |run| {
+    if (details.latest_run) |run| {
         w.writeAll(",\"latest_run\":{") catch return serverError(ctx.allocator);
         writeRunFields(&w, ctx.allocator, run) catch return serverError(ctx.allocator);
         w.writeAll("}") catch return serverError(ctx.allocator);
     }
 
-    w.writeAll(",\"dependencies\":[") catch return serverError(ctx.allocator);
-    for (dependencies, 0..) |dep, i| {
-        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-        w.writeAll("{") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "depends_on_task_id", dep.depends_on_task_id) catch return serverError(ctx.allocator);
-        w.print(",\"resolved\":{s}", .{if (dep.resolved) "true" else "false"}) catch return serverError(ctx.allocator);
-        w.writeAll("}") catch return serverError(ctx.allocator);
-    }
-    w.writeAll("]") catch return serverError(ctx.allocator);
-
-    w.writeAll(",\"assignments\":[") catch return serverError(ctx.allocator);
-    for (assignments, 0..) |a, i| {
-        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-        w.writeAll("{") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "agent_id", a.agent_id) catch return serverError(ctx.allocator);
-        w.writeAll(",") catch return serverError(ctx.allocator);
-        writeNullableStringField(&w, ctx.allocator, "assigned_by", a.assigned_by) catch return serverError(ctx.allocator);
-        w.print(",\"active\":{s},\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{
-            if (a.active) "true" else "false",
-            a.created_at_ms,
-            a.updated_at_ms,
-        }) catch return serverError(ctx.allocator);
-        w.writeAll("}") catch return serverError(ctx.allocator);
-    }
-    w.writeAll("]") catch return serverError(ctx.allocator);
-
-    // Available transitions
-    if (pipeline) |pip| {
-        var parsed_pipeline = domain.parseAndValidate(ctx.allocator, pip.definition_json) catch {
-            w.writeAll(",\"available_transitions\":[]") catch return serverError(ctx.allocator);
-            w.writeAll("}") catch return serverError(ctx.allocator);
-            return .{ .status = "200 OK", .body = buf.items };
-        };
-        defer parsed_pipeline.deinit();
-
-        const transitions = domain.getAvailableTransitions(ctx.allocator, parsed_pipeline.value, task.stage) catch &.{};
-        w.writeAll(",\"available_transitions\":[") catch return serverError(ctx.allocator);
-        for (transitions, 0..) |t, i| {
-            if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-            w.writeAll("{") catch return serverError(ctx.allocator);
-            writeStringField(&w, ctx.allocator, "trigger", t.trigger) catch return serverError(ctx.allocator);
-            w.writeAll(",") catch return serverError(ctx.allocator);
-            writeStringField(&w, ctx.allocator, "to", t.to) catch return serverError(ctx.allocator);
-            w.writeAll(",\"required_gates\":") catch return serverError(ctx.allocator);
-            if (t.required_gates) |required_gates| {
-                w.writeAll("[") catch return serverError(ctx.allocator);
-                for (required_gates, 0..) |gate, gi| {
-                    if (gi > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-                    const gate_json = quoteJson(ctx.allocator, gate) catch return serverError(ctx.allocator);
-                    w.writeAll(gate_json) catch return serverError(ctx.allocator);
-                }
-                w.writeAll("]") catch return serverError(ctx.allocator);
-            } else {
-                w.writeAll("[]") catch return serverError(ctx.allocator);
-            }
-            w.writeAll("}") catch return serverError(ctx.allocator);
-        }
-        w.writeAll("]") catch return serverError(ctx.allocator);
-    }
+    writeDependencyRows(&w, ctx.allocator, details.dependencies) catch return serverError(ctx.allocator);
+    writeAssignmentRows(&w, ctx.allocator, details.assignments) catch return serverError(ctx.allocator);
+    writeTaskTransitions(&w, ctx.allocator, details.available_transitions) catch return serverError(ctx.allocator);
 
     w.writeAll("}") catch return serverError(ctx.allocator);
     return .{ .status = "200 OK", .body = buf.items };
@@ -832,6 +793,9 @@ fn handleClaim(ctx: *Context, body: []const u8) HttpResponse {
         agent_id: []const u8,
         agent_role: []const u8,
         lease_ttl_ms: ?i64 = null,
+        concurrency: ?struct {
+            per_state: ?std.json.Value = null,
+        } = null,
     }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
         return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
     };
@@ -839,7 +803,10 @@ fn handleClaim(ctx: *Context, body: []const u8) HttpResponse {
     const req = parsed.value;
     const ttl = req.lease_ttl_ms orelse 300_000; // 5 min default
 
-    const result = ctx.store.claimTask(req.agent_id, req.agent_role, ttl) catch |err| {
+    // Extract per_state concurrency map
+    const per_state_val: ?std.json.Value = if (req.concurrency) |conc| conc.per_state else null;
+
+    const result = ctx.store.claimTask(req.agent_id, req.agent_role, ttl, per_state_val) catch |err| {
         log.err("claim failed: {}", .{err});
         return serverError(ctx.allocator);
     };
@@ -981,7 +948,6 @@ fn handleTransition(ctx: *Context, run_id: []const u8, body: []const u8, raw_req
             error.RunNotFound => respondError(ctx.allocator, 404, "not_found", "Run not found"),
             error.RunNotRunning => respondError(ctx.allocator, 409, "conflict", "Run is not in running state"),
             error.InvalidTransition => respondError(ctx.allocator, 400, "invalid_transition", "No valid transition for this trigger from current stage"),
-            error.RequiredGatesNotPassed => respondError(ctx.allocator, 409, "required_gates_not_passed", "Required quality gates are not passed"),
             error.ExpectedStageMismatch => respondError(ctx.allocator, 409, "expected_stage_mismatch", "Current task stage does not match expected_stage"),
             error.TaskVersionMismatch => respondError(ctx.allocator, 409, "task_version_mismatch", "Current task version does not match expected_task_version"),
             else => serverError(ctx.allocator),
@@ -1202,70 +1168,14 @@ fn handleUnassignTask(ctx: *Context, task_id: []const u8, agent_id: []const u8) 
     return .{ .status = "200 OK", .body = "{\"status\":\"unassigned\"}" };
 }
 
-fn handleAddGateResult(ctx: *Context, run_id: []const u8, body: []const u8, raw_request: []const u8) HttpResponse {
-    const token = extractBearerToken(raw_request) orelse {
-        return respondError(ctx.allocator, 401, "unauthorized", "Missing Authorization header");
-    };
-    ctx.store.validateLeaseByRunId(run_id, token) catch |err| {
-        return switch (err) {
-            error.LeaseNotFound => respondError(ctx.allocator, 404, "not_found", "No active lease for this run"),
-            error.InvalidToken => respondError(ctx.allocator, 401, "unauthorized", "Invalid token"),
-            error.LeaseExpired => respondError(ctx.allocator, 410, "expired", "Lease expired"),
-            else => serverError(ctx.allocator),
-        };
-    };
-
-    var parsed = std.json.parseFromSlice(struct {
-        gate: []const u8,
-        status: []const u8,
-        evidence: ?std.json.Value = null,
-        actor: ?[]const u8 = null,
-    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
-        return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
-    };
-    defer parsed.deinit();
-
-    if (!std.mem.eql(u8, parsed.value.status, "pass") and !std.mem.eql(u8, parsed.value.status, "fail")) {
-        return respondError(ctx.allocator, 400, "invalid_status", "status must be pass or fail");
+fn handleGetTaskRunState(ctx: *Context, task_id: []const u8) HttpResponse {
+    const run_id = ctx.store.getTaskRunId(task_id) catch return serverError(ctx.allocator);
+    if (run_id) |rid| {
+        defer ctx.store.freeOwnedString(rid);
+        const resp = std.fmt.allocPrint(ctx.allocator, "{{\"run_id\":\"{s}\"}}", .{rid}) catch return serverError(ctx.allocator);
+        return .{ .status = "200 OK", .body = resp };
     }
-
-    const evidence_json = if (parsed.value.evidence) |e| (jsonStringify(ctx.allocator, e) catch "{}") else "{}";
-    const id = ctx.store.addGateResult(run_id, parsed.value.gate, parsed.value.status, evidence_json, parsed.value.actor) catch |err| {
-        return switch (err) {
-            error.RunNotFound => respondError(ctx.allocator, 404, "not_found", "Run not found"),
-            else => serverError(ctx.allocator),
-        };
-    };
-
-    const resp = std.fmt.allocPrint(ctx.allocator, "{{\"id\":{d}}}", .{id}) catch return serverError(ctx.allocator);
-    return .{ .status = "201 Created", .body = resp, .status_code = 201 };
-}
-
-fn handleListGateResults(ctx: *Context, run_id: []const u8) HttpResponse {
-    const rows = ctx.store.listGateResults(run_id) catch return serverError(ctx.allocator);
-    defer ctx.store.freeGateResultRows(rows);
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    var w = buf.writer(ctx.allocator);
-    w.writeAll("[") catch return serverError(ctx.allocator);
-    for (rows, 0..) |row, i| {
-        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-        w.writeAll("{") catch return serverError(ctx.allocator);
-        w.print("\"id\":{d},", .{row.id}) catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "run_id", row.run_id) catch return serverError(ctx.allocator);
-        w.writeAll(",") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "task_id", row.task_id) catch return serverError(ctx.allocator);
-        w.writeAll(",") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "gate", row.gate) catch return serverError(ctx.allocator);
-        w.writeAll(",") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "status", row.status) catch return serverError(ctx.allocator);
-        w.print(",\"evidence\":{s},", .{row.evidence_json}) catch return serverError(ctx.allocator);
-        writeNullableStringField(&w, ctx.allocator, "actor", row.actor) catch return serverError(ctx.allocator);
-        w.print(",\"ts_ms\":{d}", .{row.ts_ms}) catch return serverError(ctx.allocator);
-        w.writeAll("}") catch return serverError(ctx.allocator);
-    }
-    w.writeAll("]") catch return serverError(ctx.allocator);
-    return .{ .status = "200 OK", .body = buf.items };
+    return respondError(ctx.allocator, 404, "not_found", "Task has no run_id");
 }
 
 fn handleQueueOps(ctx: *Context, query: ?[]const u8) HttpResponse {
@@ -1391,6 +1301,187 @@ fn writeRunFields(w: anytype, allocator: std.mem.Allocator, r: store_mod.RunRow)
     }
 }
 
+fn writeDependencyRows(w: anytype, allocator: std.mem.Allocator, rows: []store_mod.DependencyRow) !void {
+    try w.writeAll(",\"dependencies\":[");
+    for (rows, 0..) |dep, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{");
+        try writeStringField(w, allocator, "depends_on_task_id", dep.depends_on_task_id);
+        try w.print(",\"resolved\":{s}", .{if (dep.resolved) "true" else "false"});
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
+fn writeAssignmentRows(w: anytype, allocator: std.mem.Allocator, rows: []store_mod.AssignmentRow) !void {
+    try w.writeAll(",\"assignments\":[");
+    for (rows, 0..) |assignment, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{");
+        try writeStringField(w, allocator, "agent_id", assignment.agent_id);
+        try w.writeAll(",");
+        try writeNullableStringField(w, allocator, "assigned_by", assignment.assigned_by);
+        try w.print(",\"active\":{s},\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{
+            if (assignment.active) "true" else "false",
+            assignment.created_at_ms,
+            assignment.updated_at_ms,
+        });
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
+fn writeTaskTransitions(w: anytype, allocator: std.mem.Allocator, rows: []store_mod.TaskTransition) !void {
+    try w.writeAll(",\"available_transitions\":[");
+    for (rows, 0..) |transition, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{");
+        try writeStringField(w, allocator, "trigger", transition.trigger);
+        try w.writeAll(",");
+        try writeStringField(w, allocator, "to", transition.to);
+        try w.writeAll(",\"required_gates\":");
+        if (transition.required_gates) |required_gates| {
+            try w.writeAll("[");
+            for (required_gates, 0..) |gate, gi| {
+                if (gi > 0) try w.writeAll(",");
+                const gate_json = try quoteJson(allocator, gate);
+                try w.writeAll(gate_json);
+            }
+            try w.writeAll("]");
+        } else {
+            try w.writeAll("[]");
+        }
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
+// ===== Store handlers =====
+
+fn handleStorePut(ctx: *Context, namespace: []const u8, key: []const u8, body: []const u8) HttpResponse {
+    if (std.mem.eql(u8, namespace, "search")) {
+        return respondError(ctx.allocator, 400, "reserved_namespace", "\"search\" is a reserved namespace name");
+    }
+    var parsed = std.json.parseFromSlice(struct {
+        value: std.json.Value,
+    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body; expected {\"value\": ...}");
+    };
+    defer parsed.deinit();
+    const value_json = jsonStringify(ctx.allocator, parsed.value.value) catch return serverError(ctx.allocator);
+
+    ctx.store.storePut(namespace, key, value_json) catch return serverError(ctx.allocator);
+    return .{ .status = "204 No Content", .body = "", .status_code = 204 };
+}
+
+fn handleStoreGet(ctx: *Context, namespace: []const u8, key: []const u8) HttpResponse {
+    const entry = ctx.store.storeGet(ctx.allocator, namespace, key) catch return serverError(ctx.allocator);
+    if (entry) |e| {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var w = buf.writer(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "namespace", e.namespace) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "key", e.key) catch return serverError(ctx.allocator);
+        w.print(",\"value\":{s}", .{e.value_json}) catch return serverError(ctx.allocator);
+        w.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{ e.created_at_ms, e.updated_at_ms }) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+        return .{ .status = "200 OK", .body = buf.items };
+    } else {
+        return respondError(ctx.allocator, 404, "not_found", "Key not found");
+    }
+}
+
+fn handleStoreList(ctx: *Context, namespace: []const u8) HttpResponse {
+    const entries = ctx.store.storeList(ctx.allocator, namespace) catch return serverError(ctx.allocator);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(ctx.allocator);
+    w.writeAll("[") catch return serverError(ctx.allocator);
+    for (entries, 0..) |e, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "namespace", e.namespace) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "key", e.key) catch return serverError(ctx.allocator);
+        w.print(",\"value\":{s}", .{e.value_json}) catch return serverError(ctx.allocator);
+        w.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{ e.created_at_ms, e.updated_at_ms }) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]") catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = buf.items };
+}
+
+fn handleStoreDelete(ctx: *Context, namespace: []const u8, key: []const u8) HttpResponse {
+    ctx.store.storeDelete(namespace, key) catch return serverError(ctx.allocator);
+    return .{ .status = "204 No Content", .body = "", .status_code = 204 };
+}
+
+fn handleStoreDeleteNamespace(ctx: *Context, namespace: []const u8) HttpResponse {
+    ctx.store.storeDeleteNamespace(namespace) catch return serverError(ctx.allocator);
+    return .{ .status = "204 No Content", .body = "", .status_code = 204 };
+}
+
+fn sanitizeFts5Query(allocator: std.mem.Allocator, raw: []const u8) ?[]const u8 {
+    // Split on whitespace, wrap each token in double quotes (escaping internal quotes).
+    // This turns arbitrary user input into safe FTS5 literal phrases.
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(allocator);
+    var first = true;
+    var it = std.mem.tokenizeAny(u8, raw, " \t\n\r");
+    while (it.next()) |token| {
+        if (!first) w.writeAll(" ") catch return null;
+        first = false;
+        w.writeAll("\"") catch return null;
+        for (token) |ch| {
+            if (ch == '"') {
+                w.writeAll("\"\"") catch return null;
+            } else {
+                w.writeByte(ch) catch return null;
+            }
+        }
+        w.writeAll("\"") catch return null;
+    }
+    if (first) return null; // all whitespace / empty
+    return buf.items;
+}
+
+fn handleStoreSearch(ctx: *Context, query: ?[]const u8) HttpResponse {
+    const raw_q = parseQueryParam(query, "q") orelse {
+        return respondError(ctx.allocator, 400, "missing_param", "Query parameter 'q' is required");
+    };
+    const q = urlDecode(ctx.allocator, raw_q) orelse raw_q;
+    const sanitized = sanitizeFts5Query(ctx.allocator, q) orelse {
+        return respondError(ctx.allocator, 400, "invalid_query", "Search query must contain at least one non-whitespace term");
+    };
+    const namespace = decodeQueryParamValue(ctx.allocator, parseQueryParam(query, "namespace"));
+    const limit_str = parseQueryParam(query, "limit");
+    const limit: usize = if (limit_str) |ls| (std.fmt.parseInt(usize, ls, 10) catch 10) else 10;
+    if (limit == 0 or limit > 1000) {
+        return respondError(ctx.allocator, 400, "invalid_limit", "limit must be between 1 and 1000");
+    }
+    const filter_path = decodeQueryParamValue(ctx.allocator, parseQueryParam(query, "filter_path"));
+    const filter_value = decodeQueryParamValue(ctx.allocator, parseQueryParam(query, "filter_value"));
+
+    const entries = ctx.store.storeSearch(ctx.allocator, namespace, sanitized, limit, filter_path, filter_value) catch return serverError(ctx.allocator);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(ctx.allocator);
+    w.writeAll("[") catch return serverError(ctx.allocator);
+    for (entries, 0..) |e, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "namespace", e.namespace) catch return serverError(ctx.allocator);
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(&w, ctx.allocator, "key", e.key) catch return serverError(ctx.allocator);
+        w.print(",\"value\":{s}", .{e.value_json}) catch return serverError(ctx.allocator);
+        w.print(",\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{ e.created_at_ms, e.updated_at_ms }) catch return serverError(ctx.allocator);
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]") catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = buf.items };
+}
+
 fn jsonStringify(allocator: std.mem.Allocator, value: std.json.Value) ![]const u8 {
     return std.json.Stringify.valueAlloc(allocator, value, .{}) catch return error.JsonStringifyFailed;
 }
@@ -1430,6 +1521,66 @@ pub fn parseQueryParam(query: ?[]const u8, key: []const u8) ?[]const u8 {
             }
         }
     }
+    return null;
+}
+
+fn decodePathSegment(allocator: std.mem.Allocator, segment: ?[]const u8) ?[]const u8 {
+    const raw = segment orelse return null;
+    if (std.mem.indexOfScalar(u8, raw, '%') == null) return raw;
+    return decodeComponent(allocator, raw, false) orelse raw;
+}
+
+fn decodeQueryParamValue(allocator: std.mem.Allocator, value: ?[]const u8) ?[]const u8 {
+    const raw = value orelse return null;
+    return urlDecode(allocator, raw) orelse raw;
+}
+
+/// URL-decode a query parameter value: decode %XX sequences and replace '+' with space.
+pub fn urlDecode(allocator: std.mem.Allocator, input: []const u8) ?[]const u8 {
+    return decodeComponent(allocator, input, true);
+}
+
+fn decodeComponent(allocator: std.mem.Allocator, input: []const u8, plus_as_space: bool) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, input, '%') == null and (!plus_as_space or std.mem.indexOfScalar(u8, input, '+') == null)) {
+        return input;
+    }
+    var buf = allocator.alloc(u8, input.len) catch return null;
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < input.len) {
+        if (plus_as_space and input[i] == '+') {
+            buf[out] = ' ';
+            out += 1;
+            i += 1;
+        } else if (input[i] == '%' and i + 2 < input.len) {
+            const hi = hexVal(input[i + 1]) orelse {
+                buf[out] = input[i];
+                out += 1;
+                i += 1;
+                continue;
+            };
+            const lo = hexVal(input[i + 2]) orelse {
+                buf[out] = input[i];
+                out += 1;
+                i += 1;
+                continue;
+            };
+            buf[out] = (@as(u8, hi) << 4) | @as(u8, lo);
+            out += 1;
+            i += 3;
+        } else {
+            buf[out] = input[i];
+            out += 1;
+            i += 1;
+        }
+    }
+    return buf[0..out];
+}
+
+fn hexVal(c: u8) ?u4 {
+    if (c >= '0' and c <= '9') return @intCast(c - '0');
+    if (c >= 'a' and c <= 'f') return @intCast(c - 'a' + 10);
+    if (c >= 'A' and c <= 'F') return @intCast(c - 'A' + 10);
     return null;
 }
 
@@ -1476,7 +1627,7 @@ fn isAuthorized(
 fn requiresLeaseOrAdminToken(seg0: ?[]const u8, seg1: ?[]const u8, seg2: ?[]const u8) bool {
     if (eql(seg0, "leases") and seg1 != null and eql(seg2, "heartbeat")) return true;
     if (eql(seg0, "runs") and seg1 != null and seg2 != null) {
-        return eql(seg2, "events") or eql(seg2, "gates") or eql(seg2, "transition") or eql(seg2, "fail");
+        return eql(seg2, "events") or eql(seg2, "transition") or eql(seg2, "fail");
     }
     return false;
 }
@@ -1582,4 +1733,95 @@ test "auth accepts admin token for protected endpoint" {
         "Authorization: Bearer secret\r\n\r\n";
     const resp = handleRequest(&ctx, "GET", "/tasks", "", raw);
     try std.testing.expectEqualStrings("200 OK", resp.status);
+}
+
+test "store API decodes percent-encoded namespace and key segments" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const put_resp = handleRequest(
+        &ctx,
+        "PUT",
+        "/store/team%20alpha/key%2F1",
+        "{\"value\":{\"message\":\"hello\"}}",
+        "PUT /store/team%20alpha/key%2F1 HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("204 No Content", put_resp.status);
+
+    const get_resp = handleRequest(
+        &ctx,
+        "GET",
+        "/store/team%20alpha/key%2F1",
+        "",
+        "GET /store/team%20alpha/key%2F1 HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("200 OK", get_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, get_resp.body, "\"namespace\":\"team alpha\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, get_resp.body, "\"key\":\"key/1\"") != null);
+}
+
+test "store search decodes namespace and filter query params" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const put_resp = handleRequest(
+        &ctx,
+        "PUT",
+        "/store/team%20alpha/key%2F1",
+        "{\"value\":{\"message\":\"hello world\",\"status\":\"release candidate\"}}",
+        "PUT /store/team%20alpha/key%2F1 HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("204 No Content", put_resp.status);
+
+    const search_resp = handleRequest(
+        &ctx,
+        "GET",
+        "/store/search?q=hello&namespace=team%20alpha&filter_path=%24.status&filter_value=release+candidate",
+        "",
+        "GET /store/search?q=hello&namespace=team%20alpha&filter_path=%24.status&filter_value=release+candidate HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("200 OK", search_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, search_resp.body, "\"key\":\"key/1\"") != null);
+}
+
+test "store search rejects excessive limit" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const resp = handleRequest(
+        &ctx,
+        "GET",
+        "/store/search?q=hello&limit=1001",
+        "",
+        "GET /store/search?q=hello&limit=1001 HTTP/1.1\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings("400 Bad Request", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"invalid_limit\"") != null);
 }

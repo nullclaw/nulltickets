@@ -3,7 +3,7 @@
   "info": {
     "title": "nullTickets API",
     "version": "2026.3.2",
-    "description": "Headless AI task tracker API with leases, quality gates, dependencies, assignments, pagination, and orchestrator ops endpoints."
+    "description": "Headless AI task tracker API with leases, dependencies, assignments, pagination, KV store, and orchestrator ops endpoints."
   },
   "servers": [
     { "url": "http://127.0.0.1:7700" }
@@ -327,40 +327,6 @@
         }
       }
     },
-    "/runs/{id}/gates": {
-      "post": {
-        "summary": "Record gate result",
-        "security": [{ "bearerAuth": [] }],
-        "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GateResultCreateRequest" } } }
-        },
-        "responses": {
-          "201": {
-            "description": "Created",
-            "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "integer" } }, "required": ["id"] } } }
-          },
-          "401": { "$ref": "#/components/responses/Error401" },
-          "404": { "$ref": "#/components/responses/Error404" },
-          "410": { "$ref": "#/components/responses/Error410" }
-        }
-      },
-      "get": {
-        "summary": "List gate results",
-        "parameters": [
-          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "responses": {
-          "200": {
-            "description": "Gate results",
-            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/GateResult" } } } }
-          }
-        }
-      }
-    },
     "/runs/{id}/transition": {
       "post": {
         "summary": "Transition task stage",
@@ -448,6 +414,105 @@
           }
         }
       }
+    },
+    "/tasks/{id}/run-state": {
+      "get": {
+        "summary": "Get task run_id",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run state",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "run_id": { "type": "string" } }, "required": ["run_id"] } } }
+          },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      }
+    },
+    "/store/{namespace}/{key}": {
+      "put": {
+        "summary": "Put store entry",
+        "description": "Path segments are URL-decoded server-side. Percent-encode reserved characters such as spaces or '/'.",
+        "parameters": [
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } },
+          { "name": "key", "in": "path", "required": true, "description": "Store key. Reserved characters should be percent-encoded by the client.", "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StorePutRequest" } } }
+        },
+        "responses": {
+          "204": { "description": "Stored" }
+        }
+      },
+      "get": {
+        "summary": "Get store entry",
+        "parameters": [
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } },
+          { "name": "key", "in": "path", "required": true, "description": "Store key. Reserved characters should be percent-encoded by the client.", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Entry",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StoreEntry" } } }
+          },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      },
+      "delete": {
+        "summary": "Delete store entry",
+        "parameters": [
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } },
+          { "name": "key", "in": "path", "required": true, "description": "Store key. Reserved characters should be percent-encoded by the client.", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Deleted" }
+        }
+      }
+    },
+    "/store/{namespace}": {
+      "get": {
+        "summary": "List store entries in namespace",
+        "parameters": [
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Entries",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/StoreEntry" } } } }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete all entries in namespace",
+        "parameters": [
+          { "name": "namespace", "in": "path", "required": true, "description": "Store namespace. The literal name 'search' is reserved for the search endpoint.", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "description": "Deleted" }
+        }
+      }
+    },
+    "/store/search": {
+      "get": {
+        "summary": "Full-text search store entries",
+        "description": "Searches FTS5 content and can optionally narrow results with exact JSON filtering via filter_path/filter_value.",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "namespace", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } },
+          { "name": "filter_path", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "filter_value", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/StoreEntry" } } } }
+          },
+          "400": { "$ref": "#/components/responses/Error400" }
+        }
+      }
     }
   },
   "components": {
@@ -525,7 +590,8 @@
         "properties": {
           "agent_role": { "type": ["string", "null"] },
           "description": { "type": ["string", "null"] },
-          "terminal": { "type": ["boolean", "null"] }
+          "terminal": { "type": ["boolean", "null"] },
+          "workflow_id": { "type": ["string", "null"] }
         }
       },
       "PipelineTransitionDef": {
@@ -700,7 +766,17 @@
         "properties": {
           "agent_id": { "type": "string" },
           "agent_role": { "type": "string" },
-          "lease_ttl_ms": { "type": "integer" }
+          "lease_ttl_ms": { "type": "integer" },
+          "concurrency": {
+            "type": ["object", "null"],
+            "properties": {
+              "per_state": {
+                "type": ["object", "null"],
+                "description": "Map of state name to max concurrent leased tasks",
+                "additionalProperties": { "type": "integer" }
+              }
+            }
+          }
         }
       },
       "ClaimResponse": {
@@ -739,30 +815,6 @@
         "properties": {
           "items": { "type": "array", "items": { "$ref": "#/components/schemas/RunEvent" } },
           "next_cursor": { "type": ["string", "null"] }
-        }
-      },
-      "GateResultCreateRequest": {
-        "type": "object",
-        "required": ["gate", "status"],
-        "properties": {
-          "gate": { "type": "string" },
-          "status": { "type": "string", "enum": ["pass", "fail"] },
-          "evidence": { "type": ["object", "null"], "additionalProperties": true },
-          "actor": { "type": ["string", "null"] }
-        }
-      },
-      "GateResult": {
-        "type": "object",
-        "required": ["id", "run_id", "task_id", "gate", "status", "evidence", "ts_ms"],
-        "properties": {
-          "id": { "type": "integer" },
-          "run_id": { "type": "string" },
-          "task_id": { "type": "string" },
-          "gate": { "type": "string" },
-          "status": { "type": "string", "enum": ["pass", "fail"] },
-          "evidence": { "type": "object", "additionalProperties": true },
-          "actor": { "type": ["string", "null"] },
-          "ts_ms": { "type": "integer" }
         }
       },
       "TransitionRequest": {
@@ -847,6 +899,24 @@
         "properties": {
           "roles": { "type": "array", "items": { "$ref": "#/components/schemas/QueueRoleStats" } },
           "generated_at_ms": { "type": "integer" }
+        }
+      },
+      "StorePutRequest": {
+        "type": "object",
+        "required": ["value"],
+        "properties": {
+          "value": {}
+        }
+      },
+      "StoreEntry": {
+        "type": "object",
+        "required": ["namespace", "key", "value", "created_at_ms", "updated_at_ms"],
+        "properties": {
+          "namespace": { "type": "string" },
+          "key": { "type": "string" },
+          "value": {},
+          "created_at_ms": { "type": "integer" },
+          "updated_at_ms": { "type": "integer" }
         }
       }
     }

@@ -19,10 +19,6 @@ State metadata supports:
 - `description`: optional description
 - `terminal`: whether this stage is terminal
 
-Transition metadata supports:
-
-- `required_gates`: quality gates that must be passed before transition
-
 ## Transition Rules
 
 - Every transition must reference existing states.
@@ -52,13 +48,6 @@ Transition metadata supports:
 - Inspect: `GET /tasks/{id}/dependencies`
 
 Dependencies are resolved only when the upstream task reaches a terminal pipeline stage.
-
-## Quality Gates
-
-- Add gate result: `POST /runs/{id}/gates`
-- Inspect gate history: `GET /runs/{id}/gates`
-
-`/runs/{id}/transition` returns `409` if required gates are not passed.
 
 ## Assignments (Optional)
 

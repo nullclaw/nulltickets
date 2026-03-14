@@ -19,7 +19,7 @@ stages, and attach artifacts.
 - `nullTickets` (this repository) is responsible for durable task state:
   - pipelines, stages, transitions
   - runs, leases, events, artifacts
-  - dependencies, quality gates, assignments
+  - dependencies, assignments
   - idempotent writes and optimistic transition checks
 - `nullTickets` is intentionally orchestration-light:
   - it does not decide global scheduling strategy
@@ -40,7 +40,7 @@ Practical architecture:
 You do not have to use all three components.
 
 - `nullclaw` + `nullTickets` is a valid setup for sequential execution.
-- `nullTickets` can be used with other agent runtimes as long as they implement the tracker contract (`claim -> events/gates -> transition/fail`).
+- `nullTickets` can be used with other agent runtimes as long as they implement the tracker contract (`claim -> events -> transition/fail`).
 - `nullboiler` is optional and is mainly needed for advanced multi-agent orchestration.
 
 ## Adoption Path
@@ -87,10 +87,15 @@ bash tests/test_e2e.sh
 
 - `src/main.zig` - process entrypoint, argument parsing, socket accept loop
 - `src/api.zig` - HTTP routing, request validation, response serialization
-- `src/store.zig` - SQLite queries, transactions, ownership/free helpers
+- `src/store.zig` - SQLite queries, transactions, migrations, ownership/free helpers
 - `src/domain.zig` - pipeline FSM parsing and validation
 - `src/ids.zig` - UUID/token/hash/time helpers
+- `src/config.zig` - config loading and resolution
+- `src/export_manifest.zig` - nullhub manifest export
+- `src/from_json.zig` - JSON config bootstrap
 - `src/migrations/001_init.sql` - database schema
+- `src/migrations/003_store.sql` - KV store table
+- `src/migrations/004_store_fts.sql` - FTS5 full-text search index
 - `tests/test_e2e.sh` - end-to-end API flow
 
 ## API Surface
@@ -116,15 +121,26 @@ bash tests/test_e2e.sh
 | `DELETE` | `/tasks/{id}/assignments/{agent_id}` | Unassign task |
 | `POST` | `/leases/claim` | Claim next task by role |
 | `POST` | `/leases/{id}/heartbeat` | Extend lease |
+| `GET` | `/tasks/{id}/run-state` | Get task run_id |
 | `POST` | `/runs/{id}/events` | Append run event |
 | `GET` | `/runs/{id}/events?limit=&cursor=` | List run events (cursor paginated) |
-| `POST` | `/runs/{id}/gates` | Add quality gate result |
-| `GET` | `/runs/{id}/gates` | List quality gate results |
 | `POST` | `/runs/{id}/transition` | Move task to next stage |
 | `POST` | `/runs/{id}/fail` | Mark run as failed |
 | `POST` | `/artifacts` | Attach artifact |
 | `GET` | `/artifacts?task_id=&run_id=&limit=&cursor=` | List artifacts (cursor paginated) |
 | `GET` | `/ops/queue` | Per-role queue stats for orchestrator |
+| `PUT` | `/store/{namespace}/{key}` | Put KV store entry |
+| `GET` | `/store/{namespace}/{key}` | Get KV store entry |
+| `DELETE` | `/store/{namespace}/{key}` | Delete KV store entry |
+| `GET` | `/store/{namespace}` | List entries in namespace |
+| `DELETE` | `/store/{namespace}` | Delete all entries in namespace |
+| `GET` | `/store/search?q=&namespace=&limit=&filter_path=&filter_value=` | Full-text search store |
+
+### Store API Notes
+
+- Store path segments are URL-decoded by the server. Clients should percent-encode reserved characters in `namespace` and `key` (for example spaces or `/`).
+- The namespace name `search` is reserved for `GET /store/search` and cannot be listed via `GET /store/{namespace}`.
+- `GET /store/search` also supports exact JSON filtering with `filter_path` and `filter_value` in addition to FTS search.
 
 ## Agent Loop
 
@@ -134,7 +150,6 @@ POST /leases/claim { agent_id, agent_role, lease_ttl_ms? }
 -> 204 (no work)
 
 POST /runs/{run_id}/events      (Bearer <lease_token>)
-POST /runs/{run_id}/gates       (Bearer <lease_token>)
 POST /runs/{run_id}/transition  (Bearer <lease_token>)
 POST /runs/{run_id}/fail        (Bearer <lease_token>)
 

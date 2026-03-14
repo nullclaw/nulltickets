@@ -32,12 +32,6 @@ OTLP attribute mapping keys:
 - `GET /pipelines`
 - `GET /pipelines/{id}`
 
-Pipeline transitions support `required_gates`:
-
-```json
-{ "from": "coding", "to": "review", "trigger": "complete", "required_gates": ["tests_passed"] }
-```
-
 ## Tasks
 
 - `POST /tasks`
@@ -71,8 +65,6 @@ Pipeline transitions support `required_gates`:
 
 - `POST /runs/{id}/events` (Bearer)
 - `GET /runs/{id}/events?limit=&cursor=`
-- `POST /runs/{id}/gates` (Bearer)
-- `GET /runs/{id}/gates`
 - `POST /runs/{id}/transition` (Bearer)
 - `POST /runs/{id}/fail` (Bearer)
 
@@ -86,7 +78,6 @@ Pipeline transitions support `required_gates`:
 
 Transition returns `409` when:
 
-- required gates are not passed
 - `expected_stage` does not match
 - `expected_task_version` does not match
 
@@ -94,6 +85,21 @@ Transition returns `409` when:
 
 - `POST /artifacts`
 - `GET /artifacts?task_id=&run_id=&limit=&cursor=`
+
+## Store (KV)
+
+- `PUT /store/{namespace}/{key}` with `{ "value": ... }`
+- `GET /store/{namespace}/{key}`
+- `DELETE /store/{namespace}/{key}`
+- `GET /store/{namespace}` (list entries)
+- `DELETE /store/{namespace}` (delete all entries in namespace)
+- `GET /store/search?q=&namespace=&limit=&filter_path=&filter_value=` (FTS5 full-text search)
+
+Notes:
+
+- `namespace` and `key` path segments are URL-decoded server-side, so clients should percent-encode reserved characters such as spaces or `/`.
+- `search` is a reserved namespace name because `GET /store/search` is the full-text search endpoint.
+- `filter_path` and `filter_value` apply an exact JSON filter on top of FTS results.
 
 ## Ops
 
