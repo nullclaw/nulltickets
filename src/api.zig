@@ -1574,7 +1574,7 @@ fn decodeComponent(allocator: std.mem.Allocator, input: []const u8, plus_as_spac
                 i += 1;
                 continue;
             };
-            buf[out] = (hi << 4) | lo;
+            buf[out] = (@as(u8, hi) << 4) | @as(u8, lo);
             out += 1;
             i += 3;
         } else {
