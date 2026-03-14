@@ -91,6 +91,8 @@ bash tests/test_e2e.sh
 - `src/domain.zig` - pipeline FSM parsing and validation
 - `src/ids.zig` - UUID/token/hash/time helpers
 - `src/config.zig` - config loading and resolution
+- `src/export_manifest.zig` - nullhub manifest export
+- `src/from_json.zig` - JSON config bootstrap
 - `src/migrations/001_init.sql` - database schema
 - `src/migrations/003_store.sql` - KV store table
 - `src/migrations/004_store_fts.sql` - FTS5 full-text search index
