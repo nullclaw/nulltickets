@@ -261,6 +261,19 @@ pub const Store = struct {
         try self.execSimple("CREATE INDEX IF NOT EXISTS idx_tasks_next_eligible ON tasks(next_eligible_at_ms);");
         try self.execSimple("CREATE INDEX IF NOT EXISTS idx_tasks_dead_letter_reason ON tasks(dead_letter_reason);");
 
+        // Migration 002: orchestration columns + drop gate_results
+        try self.ensureColumn(
+            "tasks",
+            "run_id",
+            "ALTER TABLE tasks ADD COLUMN run_id TEXT;",
+        );
+        try self.ensureColumn(
+            "tasks",
+            "workflow_state_json",
+            "ALTER TABLE tasks ADD COLUMN workflow_state_json TEXT;",
+        );
+        try self.execSimple("DROP TABLE IF EXISTS gate_results;");
+
         // Migration 003: store table
         {
             const store_sql = @embedFile("migrations/003_store.sql");
@@ -473,63 +486,6 @@ pub const Store = struct {
 
         if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
         return self.readTaskRow(stmt);
-    }
-
-    pub fn listTasks(self: *Self, stage_filter: ?[]const u8, pipeline_id_filter: ?[]const u8, limit: ?i64) ![]TaskRow {
-        // Build query dynamically
-        var sql_buf: [1024]u8 = undefined;
-        var sql_len: usize = 0;
-        const base = "SELECT id, pipeline_id, stage, title, description, priority, metadata_json, task_version, next_eligible_at_ms, max_attempts, retry_delay_ms, dead_letter_stage, dead_letter_reason, created_at_ms, updated_at_ms FROM tasks";
-        @memcpy(sql_buf[0..base.len], base);
-        sql_len = base.len;
-
-        var has_where = false;
-        if (stage_filter != null) {
-            const clause = " WHERE stage = ?";
-            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
-            sql_len += clause.len;
-            has_where = true;
-        }
-        if (pipeline_id_filter != null) {
-            const clause = if (has_where) " AND pipeline_id = ?" else " WHERE pipeline_id = ?";
-            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
-            sql_len += clause.len;
-        }
-
-        const order = " ORDER BY priority DESC, created_at_ms ASC";
-        @memcpy(sql_buf[sql_len..][0..order.len], order);
-        sql_len += order.len;
-
-        if (limit != null) {
-            const lim = " LIMIT ?";
-            @memcpy(sql_buf[sql_len..][0..lim.len], lim);
-            sql_len += lim.len;
-        }
-
-        sql_buf[sql_len] = 0;
-        const sql_z: [*:0]const u8 = @ptrCast(sql_buf[0..sql_len :0]);
-
-        const stmt = try self.prepare(sql_z);
-        defer _ = c.sqlite3_finalize(stmt);
-
-        var bind_idx: c_int = 1;
-        if (stage_filter) |sf| {
-            self.bindText(stmt, bind_idx, sf);
-            bind_idx += 1;
-        }
-        if (pipeline_id_filter) |pf| {
-            self.bindText(stmt, bind_idx, pf);
-            bind_idx += 1;
-        }
-        if (limit) |l| {
-            _ = c.sqlite3_bind_int64(stmt, bind_idx, l);
-        }
-
-        var results: std.ArrayListUnmanaged(TaskRow) = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            try results.append(self.allocator, self.readTaskRow(stmt));
-        }
-        return results.toOwnedSlice(self.allocator);
     }
 
     pub fn getLatestRun(self: *Self, task_id: []const u8) !?RunRow {
@@ -1116,24 +1072,6 @@ pub const Store = struct {
         return c.sqlite3_last_insert_rowid(self.db);
     }
 
-    pub fn listEvents(self: *Self, run_id: []const u8) ![]EventRow {
-        const stmt = try self.prepare("SELECT id, run_id, ts_ms, kind, data_json FROM events WHERE run_id = ? ORDER BY id ASC;");
-        defer _ = c.sqlite3_finalize(stmt);
-        self.bindText(stmt, 1, run_id);
-
-        var results: std.ArrayListUnmanaged(EventRow) = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            try results.append(self.allocator, .{
-                .id = c.sqlite3_column_int64(stmt, 0),
-                .run_id = self.colText(stmt, 1),
-                .ts_ms = c.sqlite3_column_int64(stmt, 2),
-                .kind = self.colText(stmt, 3),
-                .data_json = self.colText(stmt, 4),
-            });
-        }
-        return results.toOwnedSlice(self.allocator);
-    }
-
     // ===== Transition =====
 
     pub fn transitionRun(
@@ -1575,62 +1513,6 @@ pub const Store = struct {
 
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.InsertFailed;
         return id;
-    }
-
-    pub fn listArtifacts(self: *Self, task_id: ?[]const u8, run_id: ?[]const u8) ![]ArtifactRow {
-        var sql_buf: [512]u8 = undefined;
-        var sql_len: usize = 0;
-        const base = "SELECT id, task_id, run_id, created_at_ms, kind, uri, sha256_hex, size_bytes, meta_json FROM artifacts";
-        @memcpy(sql_buf[0..base.len], base);
-        sql_len = base.len;
-
-        var has_where = false;
-        if (task_id != null) {
-            const clause = " WHERE task_id = ?";
-            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
-            sql_len += clause.len;
-            has_where = true;
-        }
-        if (run_id != null) {
-            const clause = if (has_where) " AND run_id = ?" else " WHERE run_id = ?";
-            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
-            sql_len += clause.len;
-        }
-
-        const order = " ORDER BY created_at_ms DESC;";
-        @memcpy(sql_buf[sql_len..][0..order.len], order);
-        sql_len += order.len;
-
-        sql_buf[sql_len] = 0;
-        const sql_z: [*:0]const u8 = @ptrCast(sql_buf[0..sql_len :0]);
-
-        const stmt = try self.prepare(sql_z);
-        defer _ = c.sqlite3_finalize(stmt);
-
-        var bind_idx: c_int = 1;
-        if (task_id) |tid| {
-            self.bindText(stmt, bind_idx, tid);
-            bind_idx += 1;
-        }
-        if (run_id) |rid| {
-            self.bindText(stmt, bind_idx, rid);
-        }
-
-        var results: std.ArrayListUnmanaged(ArtifactRow) = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            try results.append(self.allocator, .{
-                .id = self.colText(stmt, 0),
-                .task_id = self.colTextNullable(stmt, 1),
-                .run_id = self.colTextNullable(stmt, 2),
-                .created_at_ms = c.sqlite3_column_int64(stmt, 3),
-                .kind = self.colText(stmt, 4),
-                .uri = self.colText(stmt, 5),
-                .sha256_hex = self.colTextNullable(stmt, 6),
-                .size_bytes = self.colInt64Nullable(stmt, 7),
-                .meta_json = self.colText(stmt, 8),
-            });
-        }
-        return results.toOwnedSlice(self.allocator);
     }
 
     pub fn listArtifactsPage(self: *Self, task_id: ?[]const u8, run_id: ?[]const u8, cursor_created_at_ms: ?i64, cursor_id: ?[]const u8, limit: i64) !ArtifactPage {

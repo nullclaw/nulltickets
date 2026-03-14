@@ -18,7 +18,11 @@ Primary modules:
 - `src/store.zig` - SQLite access, transactions, migrations, ownership/free helpers
 - `src/domain.zig` - pipeline FSM parse/validation/transition logic
 - `src/ids.zig` - UUID/token/hash/time helpers
+- `src/types.zig` - shared JSON response structs
+- `src/config.zig` - config loading and resolution
 - `src/migrations/001_init.sql` - schema
+- `src/migrations/003_store.sql` - KV store table
+- `src/migrations/004_store_fts.sql` - FTS5 search index
 
 Baseline commands:
 

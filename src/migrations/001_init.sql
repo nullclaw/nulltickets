@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_delay_ms INTEGER NOT NULL DEFAULT 0,
     dead_letter_stage TEXT,
     dead_letter_reason TEXT,
+    run_id TEXT,
+    workflow_state_json TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL
 );
@@ -86,19 +88,6 @@ CREATE TABLE IF NOT EXISTS task_dependencies (
     PRIMARY KEY (task_id, depends_on_task_id)
 );
 CREATE INDEX IF NOT EXISTS idx_task_dependencies_depends_on ON task_dependencies(depends_on_task_id);
-
-CREATE TABLE IF NOT EXISTS gate_results (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    gate TEXT NOT NULL,
-    status TEXT NOT NULL,
-    evidence_json TEXT NOT NULL DEFAULT '{}',
-    actor TEXT,
-    ts_ms INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_gate_results_run ON gate_results(run_id, id);
-CREATE INDEX IF NOT EXISTS idx_gate_results_gate ON gate_results(run_id, gate, id DESC);
 
 CREATE TABLE IF NOT EXISTS task_assignments (
     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
