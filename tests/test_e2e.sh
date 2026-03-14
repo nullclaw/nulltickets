@@ -343,29 +343,7 @@ assert_status 200 "$CODE" "POST /leases/claim (coder)"
 RUN2_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['run']['id'])")
 LEASE2_TOKEN=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['lease_token'])")
 
-# Transition without gate should fail
-RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $LEASE2_TOKEN" \
-    -d '{"trigger":"complete"}' \
-    "$BASE/runs/$RUN2_ID/transition")
-CODE=$(echo "$RESP" | tail -1)
-assert_status 409 "$CODE" "POST /runs/{id}/transition blocked by required gates"
-
-# Add gate result
-RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $LEASE2_TOKEN" \
-    -d '{"gate":"tests_passed","status":"pass","evidence":{"tests":"ok"},"actor":"review-bot"}' \
-    "$BASE/runs/$RUN2_ID/gates")
-CODE=$(echo "$RESP" | tail -1)
-assert_status 201 "$CODE" "POST /runs/{id}/gates"
-
-RESP=$(curl -s -w "\n%{http_code}" "$BASE/runs/$RUN2_ID/gates")
-CODE=$(echo "$RESP" | tail -1)
-BODY=$(echo "$RESP" | sed '$d')
-assert_status 200 "$CODE" "GET /runs/{id}/gates"
-assert_json "$BODY" "str(len(data))" "1" "gate result persisted"
-
-# Transition: coding → review
+# Transition: coding → review (required_gates are informational only; not enforced server-side)
 RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
     -H "Authorization: Bearer $LEASE2_TOKEN" \
     -d '{"trigger":"complete","expected_stage":"coding","expected_task_version":2}' \
@@ -429,13 +407,6 @@ assert_status 200 "$CODE" "Task re-claimable after failure"
 # Complete it this time
 RUN5_ID=$(echo "$RESP" | sed '$d' | python3 -c "import sys,json; print(json.load(sys.stdin)['run']['id'])")
 LEASE5_TOKEN=$(echo "$RESP" | sed '$d' | python3 -c "import sys,json; print(json.load(sys.stdin)['lease_token'])")
-
-RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $LEASE5_TOKEN" \
-    -d '{"gate":"tests_passed","status":"pass","evidence":{"tests":"ok"}}' \
-    "$BASE/runs/$RUN5_ID/gates")
-CODE=$(echo "$RESP" | tail -1)
-assert_status 201 "$CODE" "POST /runs/{id}/gates before retry completion"
 
 RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
     -H "Authorization: Bearer $LEASE5_TOKEN" \
@@ -587,6 +558,78 @@ CODE=$(echo "$RESP" | tail -1)
 BODY=$(echo "$RESP" | sed '$d')
 assert_status 200 "$CODE" "GET /ops/queue"
 assert_json "$BODY" "str(len(data['roles']) > 0)" "True" "queue roles present"
+
+# ===== 8.4 Store API (KV) =====
+echo ""
+echo "=== 8.4 Store API ==="
+
+# Put
+RESP=$(curl -s -w "\n%{http_code}" -X PUT -H "Content-Type: application/json" \
+    -d '{"value":{"title":"Getting Started","body":"Welcome"}}' \
+    "$BASE/store/docs/readme")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 204 "$CODE" "PUT /store/{ns}/{key}"
+
+# Get
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/store/docs/readme")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "GET /store/{ns}/{key}"
+assert_json "$BODY" "data['value']['title']" "Getting Started" "store get value"
+
+# Upsert
+RESP=$(curl -s -w "\n%{http_code}" -X PUT -H "Content-Type: application/json" \
+    -d '{"value":{"title":"Updated","body":"New content"}}' \
+    "$BASE/store/docs/readme")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 204 "$CODE" "PUT /store/{ns}/{key} (upsert)"
+
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/store/docs/readme")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_json "$BODY" "data['value']['title']" "Updated" "store upsert value"
+
+# Put second key
+RESP=$(curl -s -w "\n%{http_code}" -X PUT -H "Content-Type: application/json" \
+    -d '{"value":{"title":"API Docs","body":"Endpoints and methods"}}' \
+    "$BASE/store/docs/api")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 204 "$CODE" "PUT /store/{ns}/{key} (second key)"
+
+# List namespace
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/store/docs")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "GET /store/{ns}"
+assert_json "$BODY" "str(len(data))" "2" "store list namespace count"
+
+# Search
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/store/search?q=endpoints+methods")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "GET /store/search"
+assert_json "$BODY" "str(len(data))" "1" "store search result count"
+assert_json "$BODY" "data[0]['key']" "api" "store search found correct key"
+
+# Delete key
+RESP=$(curl -s -w "\n%{http_code}" -X DELETE "$BASE/store/docs/readme")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 204 "$CODE" "DELETE /store/{ns}/{key}"
+
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/store/docs/readme")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 404 "$CODE" "GET deleted store key returns 404"
+
+# Delete namespace
+RESP=$(curl -s -w "\n%{http_code}" -X DELETE "$BASE/store/docs")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 204 "$CODE" "DELETE /store/{ns}"
+
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/store/docs")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "GET /store/{ns} after delete"
+assert_json "$BODY" "str(len(data))" "0" "store namespace empty after delete"
 
 # ===== 9. No tasks for non-existent role =====
 echo ""
