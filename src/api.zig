@@ -282,6 +282,8 @@ pub fn handleRequest(
     }
 
     // Store (KV)
+    // NOTE: "search" is a reserved namespace — GET /store/search is the search endpoint,
+    // so a namespace literally named "search" cannot be listed via GET /store/{namespace}.
     if (eql(seg0, "store") and seg1 != null) {
         if (is_get and eql(seg1, "search") and seg2 == null) {
             response = handleStoreSearch(ctx, path.query);
@@ -1369,6 +1371,9 @@ fn writeRunFields(w: anytype, allocator: std.mem.Allocator, r: store_mod.RunRow)
 // ===== Store handlers =====
 
 fn handleStorePut(ctx: *Context, namespace: []const u8, key: []const u8, body: []const u8) HttpResponse {
+    if (std.mem.eql(u8, namespace, "search")) {
+        return respondError(ctx.allocator, 400, "reserved_namespace", "\"search\" is a reserved namespace name");
+    }
     var parsed = std.json.parseFromSlice(struct {
         value: std.json.Value,
     }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
@@ -1429,9 +1434,36 @@ fn handleStoreDeleteNamespace(ctx: *Context, namespace: []const u8) HttpResponse
     return .{ .status = "204 No Content", .body = "", .status_code = 204 };
 }
 
+fn sanitizeFts5Query(allocator: std.mem.Allocator, raw: []const u8) ?[]const u8 {
+    // Split on whitespace, wrap each token in double quotes (escaping internal quotes).
+    // This turns arbitrary user input into safe FTS5 literal phrases.
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var w = buf.writer(allocator);
+    var first = true;
+    var it = std.mem.tokenizeAny(u8, raw, " \t\n\r");
+    while (it.next()) |token| {
+        if (!first) w.writeAll(" ") catch return null;
+        first = false;
+        w.writeAll("\"") catch return null;
+        for (token) |ch| {
+            if (ch == '"') {
+                w.writeAll("\"\"") catch return null;
+            } else {
+                w.writeByte(ch) catch return null;
+            }
+        }
+        w.writeAll("\"") catch return null;
+    }
+    if (first) return null; // all whitespace / empty
+    return buf.items;
+}
+
 fn handleStoreSearch(ctx: *Context, query: ?[]const u8) HttpResponse {
     const q = parseQueryParam(query, "q") orelse {
         return respondError(ctx.allocator, 400, "missing_param", "Query parameter 'q' is required");
+    };
+    const sanitized = sanitizeFts5Query(ctx.allocator, q) orelse {
+        return respondError(ctx.allocator, 400, "invalid_query", "Search query must contain at least one non-whitespace term");
     };
     const namespace = parseQueryParam(query, "namespace");
     const limit_str = parseQueryParam(query, "limit");
@@ -1439,7 +1471,7 @@ fn handleStoreSearch(ctx: *Context, query: ?[]const u8) HttpResponse {
     const filter_path = parseQueryParam(query, "filter_path");
     const filter_value = parseQueryParam(query, "filter_value");
 
-    const entries = ctx.store.storeSearch(ctx.allocator, namespace, q, limit, filter_path, filter_value) catch return serverError(ctx.allocator);
+    const entries = ctx.store.storeSearch(ctx.allocator, namespace, sanitized, limit, filter_path, filter_value) catch return serverError(ctx.allocator);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var w = buf.writer(ctx.allocator);
