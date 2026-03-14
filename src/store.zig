@@ -1046,20 +1046,31 @@ pub const Store = struct {
             if (c.sqlite3_step(lstmt) != c.SQLITE_DONE) return error.InsertFailed;
         }
 
+        const run_task_id = try self.allocator.dupe(u8, task.id);
+        errdefer self.allocator.free(run_task_id);
+        const run_status = try self.allocator.dupe(u8, "running");
+        errdefer self.allocator.free(run_status);
+        const run_agent_id = try self.allocator.dupe(u8, agent_id);
+        errdefer self.allocator.free(run_agent_id);
+        const run_agent_role = try self.allocator.dupe(u8, agent_role);
+        errdefer self.allocator.free(run_agent_role);
+        const run_usage_json = try self.allocator.dupe(u8, "{}");
+        errdefer self.allocator.free(run_usage_json);
+
         try self.execSimple("COMMIT;");
 
         return .{
             .task = task,
             .run = .{
                 .id = run_id,
-                .task_id = task.id,
+                .task_id = run_task_id,
                 .attempt = attempt,
-                .status = "running",
-                .agent_id = agent_id,
-                .agent_role = agent_role,
+                .status = run_status,
+                .agent_id = run_agent_id,
+                .agent_role = run_agent_role,
                 .started_at_ms = now_ms,
                 .ended_at_ms = null,
-                .usage_json = "{}",
+                .usage_json = run_usage_json,
                 .error_text = null,
             },
             .lease_id = lease_id,
@@ -1476,7 +1487,7 @@ pub const Store = struct {
 
     pub fn freeClaimResult(self: *Self, claim: ClaimResult) void {
         self.freeTaskRow(claim.task);
-        self.allocator.free(claim.run.id);
+        self.freeRunRow(claim.run);
         self.allocator.free(claim.lease_id);
         self.allocator.free(claim.lease_token);
     }
@@ -2356,6 +2367,36 @@ test "task lifecycle: create, claim, event, transition" {
     // No more claimable work
     const no_claim = try store.claimTask("agent-1", "worker", 300_000, null);
     try std.testing.expect(no_claim == null);
+}
+
+test "claim result owns run fields independently from inputs and task row" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"todo","states":{"todo":{"agent_role":"worker"},"done":{"terminal":true}},"transitions":[{"from":"todo","to":"done","trigger":"complete"}]}
+    ;
+
+    const pipeline_id = try store.createPipeline("claim-owned-run", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    const task_id = try store.createTask(pipeline_id, "Owned Run", "desc", 1, "{}", null, 0, null);
+    defer store.freeOwnedString(task_id);
+
+    const agent_id = try alloc.dupe(u8, "agent-owned");
+    defer alloc.free(agent_id);
+    const agent_role = try alloc.dupe(u8, "worker");
+    defer alloc.free(agent_role);
+
+    const claim = (try store.claimTask(agent_id, agent_role, 300_000, null)).?;
+    defer store.freeClaimResult(claim);
+
+    try std.testing.expect(claim.run.task_id.ptr != claim.task.id.ptr);
+    try std.testing.expect(claim.run.agent_id != null);
+    try std.testing.expect(claim.run.agent_id.?.ptr != agent_id.ptr);
+    try std.testing.expect(claim.run.agent_role != null);
+    try std.testing.expect(claim.run.agent_role.?.ptr != agent_role.ptr);
 }
 
 test "claim respects per-state concurrency limits" {
