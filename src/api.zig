@@ -1,7 +1,6 @@
 const std = @import("std");
 const store_mod = @import("store.zig");
 const Store = store_mod.Store;
-const domain = @import("domain.zig");
 const ids = @import("ids.zig");
 const log = std.log.scoped(.api);
 
@@ -764,92 +763,26 @@ fn handleListTasks(ctx: *Context, query: ?[]const u8) HttpResponse {
 }
 
 fn handleGetTask(ctx: *Context, id: []const u8) HttpResponse {
-    const task = (ctx.store.getTask(id) catch return serverError(ctx.allocator)) orelse {
+    const details = (ctx.store.getTaskDetails(id) catch return serverError(ctx.allocator)) orelse {
         return respondError(ctx.allocator, 404, "not_found", "Task not found");
     };
-    defer ctx.store.freeTaskRow(task);
-
-    // Get pipeline definition for available transitions
-    const pipeline = ctx.store.getPipeline(task.pipeline_id) catch null;
-    defer if (pipeline) |p| ctx.store.freePipelineRow(p);
-    const latest_run = ctx.store.getLatestRun(id) catch null;
-    defer if (latest_run) |r| ctx.store.freeRunRow(r);
-    const dependencies = ctx.store.listTaskDependencies(id) catch return serverError(ctx.allocator);
-    defer ctx.store.freeDependencyRows(dependencies);
-    const assignments = ctx.store.listTaskAssignments(id) catch return serverError(ctx.allocator);
-    defer ctx.store.freeAssignmentRows(assignments);
+    defer ctx.store.freeTaskDetails(details);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var w = buf.writer(ctx.allocator);
     w.writeAll("{") catch return serverError(ctx.allocator);
-    writeTaskJsonFields(&w, ctx.allocator, task) catch return serverError(ctx.allocator);
+    writeTaskJsonFields(&w, ctx.allocator, details.task) catch return serverError(ctx.allocator);
 
     // Latest run
-    if (latest_run) |run| {
+    if (details.latest_run) |run| {
         w.writeAll(",\"latest_run\":{") catch return serverError(ctx.allocator);
         writeRunFields(&w, ctx.allocator, run) catch return serverError(ctx.allocator);
         w.writeAll("}") catch return serverError(ctx.allocator);
     }
 
-    w.writeAll(",\"dependencies\":[") catch return serverError(ctx.allocator);
-    for (dependencies, 0..) |dep, i| {
-        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-        w.writeAll("{") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "depends_on_task_id", dep.depends_on_task_id) catch return serverError(ctx.allocator);
-        w.print(",\"resolved\":{s}", .{if (dep.resolved) "true" else "false"}) catch return serverError(ctx.allocator);
-        w.writeAll("}") catch return serverError(ctx.allocator);
-    }
-    w.writeAll("]") catch return serverError(ctx.allocator);
-
-    w.writeAll(",\"assignments\":[") catch return serverError(ctx.allocator);
-    for (assignments, 0..) |a, i| {
-        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-        w.writeAll("{") catch return serverError(ctx.allocator);
-        writeStringField(&w, ctx.allocator, "agent_id", a.agent_id) catch return serverError(ctx.allocator);
-        w.writeAll(",") catch return serverError(ctx.allocator);
-        writeNullableStringField(&w, ctx.allocator, "assigned_by", a.assigned_by) catch return serverError(ctx.allocator);
-        w.print(",\"active\":{s},\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{
-            if (a.active) "true" else "false",
-            a.created_at_ms,
-            a.updated_at_ms,
-        }) catch return serverError(ctx.allocator);
-        w.writeAll("}") catch return serverError(ctx.allocator);
-    }
-    w.writeAll("]") catch return serverError(ctx.allocator);
-
-    // Available transitions
-    if (pipeline) |pip| {
-        var parsed_pipeline = domain.parseAndValidate(ctx.allocator, pip.definition_json) catch {
-            w.writeAll(",\"available_transitions\":[]") catch return serverError(ctx.allocator);
-            w.writeAll("}") catch return serverError(ctx.allocator);
-            return .{ .status = "200 OK", .body = buf.items };
-        };
-        defer parsed_pipeline.deinit();
-
-        const transitions = domain.getAvailableTransitions(ctx.allocator, parsed_pipeline.value, task.stage) catch &.{};
-        w.writeAll(",\"available_transitions\":[") catch return serverError(ctx.allocator);
-        for (transitions, 0..) |t, i| {
-            if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-            w.writeAll("{") catch return serverError(ctx.allocator);
-            writeStringField(&w, ctx.allocator, "trigger", t.trigger) catch return serverError(ctx.allocator);
-            w.writeAll(",") catch return serverError(ctx.allocator);
-            writeStringField(&w, ctx.allocator, "to", t.to) catch return serverError(ctx.allocator);
-            w.writeAll(",\"required_gates\":") catch return serverError(ctx.allocator);
-            if (t.required_gates) |required_gates| {
-                w.writeAll("[") catch return serverError(ctx.allocator);
-                for (required_gates, 0..) |gate, gi| {
-                    if (gi > 0) w.writeAll(",") catch return serverError(ctx.allocator);
-                    const gate_json = quoteJson(ctx.allocator, gate) catch return serverError(ctx.allocator);
-                    w.writeAll(gate_json) catch return serverError(ctx.allocator);
-                }
-                w.writeAll("]") catch return serverError(ctx.allocator);
-            } else {
-                w.writeAll("[]") catch return serverError(ctx.allocator);
-            }
-            w.writeAll("}") catch return serverError(ctx.allocator);
-        }
-        w.writeAll("]") catch return serverError(ctx.allocator);
-    }
+    writeDependencyRows(&w, ctx.allocator, details.dependencies) catch return serverError(ctx.allocator);
+    writeAssignmentRows(&w, ctx.allocator, details.assignments) catch return serverError(ctx.allocator);
+    writeTaskTransitions(&w, ctx.allocator, details.available_transitions) catch return serverError(ctx.allocator);
 
     w.writeAll("}") catch return serverError(ctx.allocator);
     return .{ .status = "200 OK", .body = buf.items };
@@ -1366,6 +1299,61 @@ fn writeRunFields(w: anytype, allocator: std.mem.Allocator, r: store_mod.RunRow)
     } else {
         try w.writeAll(",\"ended_at_ms\":null");
     }
+}
+
+fn writeDependencyRows(w: anytype, allocator: std.mem.Allocator, rows: []store_mod.DependencyRow) !void {
+    try w.writeAll(",\"dependencies\":[");
+    for (rows, 0..) |dep, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{");
+        try writeStringField(w, allocator, "depends_on_task_id", dep.depends_on_task_id);
+        try w.print(",\"resolved\":{s}", .{if (dep.resolved) "true" else "false"});
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
+fn writeAssignmentRows(w: anytype, allocator: std.mem.Allocator, rows: []store_mod.AssignmentRow) !void {
+    try w.writeAll(",\"assignments\":[");
+    for (rows, 0..) |assignment, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{");
+        try writeStringField(w, allocator, "agent_id", assignment.agent_id);
+        try w.writeAll(",");
+        try writeNullableStringField(w, allocator, "assigned_by", assignment.assigned_by);
+        try w.print(",\"active\":{s},\"created_at_ms\":{d},\"updated_at_ms\":{d}", .{
+            if (assignment.active) "true" else "false",
+            assignment.created_at_ms,
+            assignment.updated_at_ms,
+        });
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
+fn writeTaskTransitions(w: anytype, allocator: std.mem.Allocator, rows: []store_mod.TaskTransition) !void {
+    try w.writeAll(",\"available_transitions\":[");
+    for (rows, 0..) |transition, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{");
+        try writeStringField(w, allocator, "trigger", transition.trigger);
+        try w.writeAll(",");
+        try writeStringField(w, allocator, "to", transition.to);
+        try w.writeAll(",\"required_gates\":");
+        if (transition.required_gates) |required_gates| {
+            try w.writeAll("[");
+            for (required_gates, 0..) |gate, gi| {
+                if (gi > 0) try w.writeAll(",");
+                const gate_json = try quoteJson(allocator, gate);
+                try w.writeAll(gate_json);
+            }
+            try w.writeAll("]");
+        } else {
+            try w.writeAll("[]");
+        }
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
 }
 
 // ===== Store handlers =====

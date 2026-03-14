@@ -150,6 +150,20 @@ pub const TransitionResult = struct {
     trigger: []const u8,
 };
 
+pub const TaskTransition = struct {
+    trigger: []const u8,
+    to: []const u8,
+    required_gates: ?[]const []const u8,
+};
+
+pub const TaskDetails = struct {
+    task: TaskRow,
+    latest_run: ?RunRow,
+    dependencies: []DependencyRow,
+    assignments: []AssignmentRow,
+    available_transitions: []TaskTransition,
+};
+
 pub const OtlpSpanInsert = struct {
     trace_id: []const u8,
     span_id: []const u8,
@@ -521,6 +535,31 @@ pub const Store = struct {
         return self.readRunRow(stmt);
     }
 
+    pub fn getTaskDetails(self: *Self, id: []const u8) !?TaskDetails {
+        const task = (try self.getTask(id)) orelse return null;
+        errdefer self.freeTaskRow(task);
+
+        const latest_run = try self.getLatestRun(id);
+        errdefer if (latest_run) |row| self.freeRunRow(row);
+
+        const dependencies = try self.listTaskDependencies(id);
+        errdefer self.freeDependencyRows(dependencies);
+
+        const assignments = try self.listTaskAssignments(id);
+        errdefer self.freeAssignmentRows(assignments);
+
+        const available_transitions = try self.listTaskAvailableTransitions(task.pipeline_id, task.stage);
+        errdefer self.freeTaskTransitions(available_transitions);
+
+        return .{
+            .task = task,
+            .latest_run = latest_run,
+            .dependencies = dependencies,
+            .assignments = assignments,
+            .available_transitions = available_transitions,
+        };
+    }
+
     pub fn addTaskDependency(self: *Self, task_id: []const u8, depends_on_task_id: []const u8) !void {
         if (std.mem.eql(u8, task_id, depends_on_task_id)) return error.InvalidDependency;
 
@@ -630,6 +669,27 @@ pub const Store = struct {
                 .created_at_ms = c.sqlite3_column_int64(stmt, 4),
                 .updated_at_ms = c.sqlite3_column_int64(stmt, 5),
             });
+        }
+        return results.toOwnedSlice(self.allocator);
+    }
+
+    pub fn listTaskAvailableTransitions(self: *Self, pipeline_id: []const u8, stage: []const u8) ![]TaskTransition {
+        const pipeline = (try self.getPipeline(pipeline_id)) orelse return self.allocator.alloc(TaskTransition, 0);
+        defer self.freePipelineRow(pipeline);
+
+        var parsed = domain.parseAndValidate(self.allocator, pipeline.definition_json) catch {
+            return self.allocator.alloc(TaskTransition, 0);
+        };
+        defer parsed.deinit();
+
+        var results: std.ArrayListUnmanaged(TaskTransition) = .empty;
+        errdefer {
+            for (results.items) |transition| self.freeTaskTransition(transition);
+            results.deinit(self.allocator);
+        }
+        for (parsed.value.transitions) |transition| {
+            if (!std.mem.eql(u8, transition.from, stage)) continue;
+            try results.append(self.allocator, try self.dupeTaskTransition(transition));
         }
         return results.toOwnedSlice(self.allocator);
     }
@@ -1397,6 +1457,28 @@ pub const Store = struct {
         self.allocator.free(transition.trigger);
     }
 
+    pub fn freeTaskTransition(self: *Self, transition: TaskTransition) void {
+        self.allocator.free(transition.trigger);
+        self.allocator.free(transition.to);
+        if (transition.required_gates) |gates| {
+            for (gates) |gate| self.allocator.free(gate);
+            self.allocator.free(gates);
+        }
+    }
+
+    pub fn freeTaskTransitions(self: *Self, rows: []TaskTransition) void {
+        for (rows) |row| self.freeTaskTransition(row);
+        self.allocator.free(rows);
+    }
+
+    pub fn freeTaskDetails(self: *Self, details: TaskDetails) void {
+        self.freeTaskRow(details.task);
+        if (details.latest_run) |row| self.freeRunRow(row);
+        self.freeDependencyRows(details.dependencies);
+        self.freeAssignmentRows(details.assignments);
+        self.freeTaskTransitions(details.available_transitions);
+    }
+
     pub fn freeEventRows(self: *Self, rows: []EventRow) void {
         for (rows) |row| {
             self.allocator.free(row.run_id);
@@ -2045,6 +2127,32 @@ pub const Store = struct {
             .created_at_ms = row.created_at_ms,
             .updated_at_ms = row.updated_at_ms,
         };
+    }
+
+    fn dupeTaskTransition(self: *Self, transition: domain.TransitionDef) !TaskTransition {
+        return .{
+            .trigger = try self.allocator.dupe(u8, transition.trigger),
+            .to = try self.allocator.dupe(u8, transition.to),
+            .required_gates = if (transition.required_gates) |gates|
+                try self.dupeStringSlice(gates)
+            else
+                null,
+        };
+    }
+
+    fn dupeStringSlice(self: *Self, values: []const []const u8) ![]const []const u8 {
+        const duped = try self.allocator.alloc([]const u8, values.len);
+        var filled: usize = 0;
+        errdefer {
+            for (duped[0..filled]) |value| self.allocator.free(value);
+            self.allocator.free(duped);
+        }
+
+        for (values, 0..) |value, i| {
+            duped[i] = try self.allocator.dupe(u8, value);
+            filled = i + 1;
+        }
+        return duped;
     }
 
     fn colInt64Nullable(_: *Self, stmt: *c.sqlite3_stmt, col: c_int) ?i64 {
