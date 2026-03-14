@@ -785,23 +785,36 @@ pub const Store = struct {
 
             var stale_lease_ids: std.ArrayListUnmanaged([]const u8) = .empty;
             var stale_run_ids: std.ArrayListUnmanaged([]const u8) = .empty;
+            var seen_stale_runs = std.StringHashMap(void).init(temp_alloc);
             while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
                 try stale_lease_ids.append(temp_alloc, try temp_alloc.dupe(u8, self.colTextView(stmt, 0)));
-                try stale_run_ids.append(temp_alloc, try temp_alloc.dupe(u8, self.colTextView(stmt, 1)));
+                const run_id = try temp_alloc.dupe(u8, self.colTextView(stmt, 1));
+                if (!seen_stale_runs.contains(run_id)) {
+                    try seen_stale_runs.put(run_id, {});
+                    try stale_run_ids.append(temp_alloc, run_id);
+                }
             }
 
-            for (stale_run_ids.items) |run_id| {
+            if (stale_run_ids.items.len > 0) {
                 const upd = try self.prepare("UPDATE runs SET status = 'stale', ended_at_ms = ? WHERE id = ?;");
                 defer _ = c.sqlite3_finalize(upd);
-                _ = c.sqlite3_bind_int64(upd, 1, now_ms);
-                self.bindText(upd, 2, run_id);
-                _ = c.sqlite3_step(upd);
+                for (stale_run_ids.items) |run_id| {
+                    _ = c.sqlite3_reset(upd);
+                    _ = c.sqlite3_clear_bindings(upd);
+                    _ = c.sqlite3_bind_int64(upd, 1, now_ms);
+                    self.bindText(upd, 2, run_id);
+                    _ = c.sqlite3_step(upd);
+                }
             }
-            for (stale_lease_ids.items) |lease_id| {
+            if (stale_lease_ids.items.len > 0) {
                 const del = try self.prepare("DELETE FROM leases WHERE id = ?;");
                 defer _ = c.sqlite3_finalize(del);
-                self.bindText(del, 1, lease_id);
-                _ = c.sqlite3_step(del);
+                for (stale_lease_ids.items) |lease_id| {
+                    _ = c.sqlite3_reset(del);
+                    _ = c.sqlite3_clear_bindings(del);
+                    self.bindText(del, 1, lease_id);
+                    _ = c.sqlite3_step(del);
+                }
             }
         }
 
@@ -810,12 +823,15 @@ pub const Store = struct {
         {
             const pstmt = try self.prepare("SELECT definition_json FROM pipelines;");
             defer _ = c.sqlite3_finalize(pstmt);
+            var seen_stages = std.StringHashMap(void).init(temp_alloc);
             while (c.sqlite3_step(pstmt) == c.SQLITE_ROW) {
                 const def_json = self.colTextView(pstmt, 0);
                 var parsed = domain.parseAndValidate(temp_alloc, def_json) catch continue;
                 defer parsed.deinit();
                 const stages = domain.getStagesForRole(temp_alloc, parsed.value, agent_role) catch continue;
                 for (stages) |s| {
+                    if (seen_stages.contains(s)) continue;
+                    try seen_stages.put(s, {});
                     try all_stages.append(temp_alloc, s);
                 }
             }
@@ -828,10 +844,12 @@ pub const Store = struct {
 
         // Find task: stage matches, no active lease, ordered by priority
         var task_row: ?TaskRow = null;
+        const find_sql = "SELECT t.id, t.pipeline_id, t.stage, t.title, t.description, t.priority, t.metadata_json, t.task_version, t.next_eligible_at_ms, t.max_attempts, t.retry_delay_ms, t.dead_letter_stage, t.dead_letter_reason, t.created_at_ms, t.updated_at_ms FROM tasks t WHERE t.stage = ? AND t.dead_letter_reason IS NULL AND t.next_eligible_at_ms <= ? AND NOT EXISTS (SELECT 1 FROM leases l JOIN runs r ON l.run_id = r.id WHERE r.task_id = t.id AND l.expires_at_ms > ?) ORDER BY t.priority DESC, t.created_at_ms ASC LIMIT 20;";
+        const fstmt = try self.prepare(find_sql);
+        defer _ = c.sqlite3_finalize(fstmt);
         for (all_stages.items) |stage| {
-            const find_sql = "SELECT t.id, t.pipeline_id, t.stage, t.title, t.description, t.priority, t.metadata_json, t.task_version, t.next_eligible_at_ms, t.max_attempts, t.retry_delay_ms, t.dead_letter_stage, t.dead_letter_reason, t.created_at_ms, t.updated_at_ms FROM tasks t WHERE t.stage = ? AND t.dead_letter_reason IS NULL AND t.next_eligible_at_ms <= ? AND NOT EXISTS (SELECT 1 FROM leases l JOIN runs r ON l.run_id = r.id WHERE r.task_id = t.id AND l.expires_at_ms > ?) ORDER BY t.priority DESC, t.created_at_ms ASC LIMIT 20;";
-            const fstmt = try self.prepare(find_sql);
-            defer _ = c.sqlite3_finalize(fstmt);
+            _ = c.sqlite3_reset(fstmt);
+            _ = c.sqlite3_clear_bindings(fstmt);
             self.bindText(fstmt, 1, stage);
             _ = c.sqlite3_bind_int64(fstmt, 2, now_ms);
             _ = c.sqlite3_bind_int64(fstmt, 3, now_ms);
