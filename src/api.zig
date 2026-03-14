@@ -1459,9 +1459,10 @@ fn sanitizeFts5Query(allocator: std.mem.Allocator, raw: []const u8) ?[]const u8 
 }
 
 fn handleStoreSearch(ctx: *Context, query: ?[]const u8) HttpResponse {
-    const q = parseQueryParam(query, "q") orelse {
+    const raw_q = parseQueryParam(query, "q") orelse {
         return respondError(ctx.allocator, 400, "missing_param", "Query parameter 'q' is required");
     };
+    const q = urlDecode(ctx.allocator, raw_q) orelse raw_q;
     const sanitized = sanitizeFts5Query(ctx.allocator, q) orelse {
         return respondError(ctx.allocator, 400, "invalid_query", "Search query must contain at least one non-whitespace term");
     };
@@ -1529,6 +1530,48 @@ pub fn parseQueryParam(query: ?[]const u8, key: []const u8) ?[]const u8 {
             }
         }
     }
+    return null;
+}
+
+/// URL-decode a query parameter value: decode %XX sequences and replace '+' with space.
+pub fn urlDecode(allocator: std.mem.Allocator, input: []const u8) ?[]const u8 {
+    var buf = allocator.alloc(u8, input.len) catch return null;
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '+') {
+            buf[out] = ' ';
+            out += 1;
+            i += 1;
+        } else if (input[i] == '%' and i + 2 < input.len) {
+            const hi = hexVal(input[i + 1]) orelse {
+                buf[out] = input[i];
+                out += 1;
+                i += 1;
+                continue;
+            };
+            const lo = hexVal(input[i + 2]) orelse {
+                buf[out] = input[i];
+                out += 1;
+                i += 1;
+                continue;
+            };
+            buf[out] = (hi << 4) | lo;
+            out += 1;
+            i += 3;
+        } else {
+            buf[out] = input[i];
+            out += 1;
+            i += 1;
+        }
+    }
+    return buf[0..out];
+}
+
+fn hexVal(c: u8) ?u4 {
+    if (c >= '0' and c <= '9') return @intCast(c - '0');
+    if (c >= 'a' and c <= 'f') return @intCast(c - 'a' + 10);
+    if (c >= 'A' and c <= 'F') return @intCast(c - 'A' + 10);
     return null;
 }
 
