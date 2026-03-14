@@ -2093,3 +2093,152 @@ test "store search" {
     defer alloc.free(empty_results);
     try std.testing.expectEqual(@as(usize, 0), empty_results.len);
 }
+
+test "task lifecycle: create, claim, event, transition" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"todo","states":{"todo":{"agent_role":"worker"},"done":{"terminal":true}},"transitions":[{"from":"todo","to":"done","trigger":"complete"}]}
+    ;
+
+    // Create pipeline
+    const pipeline_id = try store.createPipeline("test-pipeline", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    // Create task
+    const task_id = try store.createTask(pipeline_id, "Test Task", "A test task", 5, "{}", null, 0, null);
+    defer store.freeOwnedString(task_id);
+
+    // Verify task is in initial stage
+    const task = (try store.getTask(task_id)).?;
+    defer store.freeTaskRow(task);
+    try std.testing.expectEqualStrings("todo", task.stage);
+    try std.testing.expectEqual(@as(i64, 5), task.priority);
+
+    // Claim task
+    const claim = (try store.claimTask("agent-1", "worker", 300_000, null)).?;
+    defer store.freeClaimResult(claim);
+    try std.testing.expectEqualStrings(task_id, claim.task.id);
+    try std.testing.expectEqualStrings("running", claim.run.status);
+    try std.testing.expect(claim.lease_token.len > 0);
+
+    // Add event
+    const event_id = try store.addEvent(claim.run.id, "progress", "{\"step\":1}");
+    try std.testing.expect(event_id > 0);
+
+    // Transition
+    const transition = try store.transitionRun(claim.run.id, "complete", null, null, "todo", null);
+    defer store.freeTransitionResult(transition);
+    try std.testing.expectEqualStrings("todo", transition.previous_stage);
+    try std.testing.expectEqualStrings("done", transition.new_stage);
+
+    // Verify task moved to terminal stage
+    const task_after = (try store.getTask(task_id)).?;
+    defer store.freeTaskRow(task_after);
+    try std.testing.expectEqualStrings("done", task_after.stage);
+    try std.testing.expectEqual(@as(i64, 2), task_after.task_version);
+
+    // No more claimable work
+    const no_claim = try store.claimTask("agent-1", "worker", 300_000, null);
+    try std.testing.expect(no_claim == null);
+}
+
+test "claim respects per-state concurrency limits" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"review","states":{"review":{"agent_role":"reviewer"},"done":{"terminal":true}},"transitions":[{"from":"review","to":"done","trigger":"approve"}]}
+    ;
+
+    const pipeline_id = try store.createPipeline("concurrency-test", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    // Create 3 tasks
+    const t1 = try store.createTask(pipeline_id, "Task 1", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(t1);
+    const t2 = try store.createTask(pipeline_id, "Task 2", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(t2);
+    const t3 = try store.createTask(pipeline_id, "Task 3", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(t3);
+
+    // Set per-state concurrency limit of 2 for "review"
+    var concurrency_map = std.json.ObjectMap.init(alloc);
+    defer concurrency_map.deinit();
+    try concurrency_map.put("review", .{ .integer = 2 });
+    const per_state: std.json.Value = .{ .object = concurrency_map };
+
+    // Claim first two tasks — should succeed
+    const c1 = (try store.claimTask("a1", "reviewer", 300_000, per_state)).?;
+    defer store.freeClaimResult(c1);
+    const c2 = (try store.claimTask("a2", "reviewer", 300_000, per_state)).?;
+    defer store.freeClaimResult(c2);
+
+    // Third claim should be blocked by concurrency limit
+    const c3 = try store.claimTask("a3", "reviewer", 300_000, per_state);
+    try std.testing.expect(c3 == null);
+
+    // Complete one task, freeing a slot
+    const transition = try store.transitionRun(c1.run.id, "approve", null, null, null, null);
+    defer store.freeTransitionResult(transition);
+
+    // Now third claim should succeed
+    const c3_retry = (try store.claimTask("a3", "reviewer", 300_000, per_state)).?;
+    defer store.freeClaimResult(c3_retry);
+    try std.testing.expectEqualStrings(t3, c3_retry.task.id);
+}
+
+test "claim: no work when no matching role" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"coding","states":{"coding":{"agent_role":"coder"},"done":{"terminal":true}},"transitions":[{"from":"coding","to":"done","trigger":"complete"}]}
+    ;
+
+    const pipeline_id = try store.createPipeline("role-test", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    const task_id = try store.createTask(pipeline_id, "Code Task", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(task_id);
+
+    // Claim with wrong role returns null
+    const result = try store.claimTask("agent-1", "reviewer", 300_000, null);
+    try std.testing.expect(result == null);
+
+    // Claim with correct role returns task
+    const claim = (try store.claimTask("agent-1", "coder", 300_000, null)).?;
+    defer store.freeClaimResult(claim);
+    try std.testing.expectEqualStrings(task_id, claim.task.id);
+}
+
+test "fail run with retry policy" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"process","states":{"process":{"agent_role":"worker"},"dead":{"terminal":true}},"transitions":[{"from":"process","to":"dead","trigger":"complete"}]}
+    ;
+
+    const pipeline_id = try store.createPipeline("retry-test", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    const task_id = try store.createTask(pipeline_id, "Retry Task", "desc", 0, "{}", 2, 1000, "dead");
+    defer store.freeOwnedString(task_id);
+
+    // First claim and fail
+    const c1 = (try store.claimTask("agent-1", "worker", 300_000, null)).?;
+    defer store.freeClaimResult(c1);
+    try store.failRun(c1.run.id, "error 1", null);
+
+    // Task should have next_eligible_at_ms set (retry delay)
+    const task_after_1 = (try store.getTask(task_id)).?;
+    defer store.freeTaskRow(task_after_1);
+    try std.testing.expect(task_after_1.next_eligible_at_ms > 0);
+    try std.testing.expect(task_after_1.dead_letter_reason == null);
+}
