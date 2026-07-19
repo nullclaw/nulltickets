@@ -1,0 +1,24 @@
+# NullTickets
+
+> Track durable AI-agent work with lease-based claims, pipeline states, retries, dead letters and idempotent writes. One Zig binary with embedded SQLite.
+
+Part of the Null ecosystem (https://nullmenu.ai) — single-binary Zig tools for running AI agents on your own hardware. All components are pre-1.0 with CalVer releases. The links below point to canonical documentation pages.
+
+## Start
+
+- [Install](https://tickets.nullmenu.ai/docs/start/install/): Get the NullTickets binary — release download, source build, or NullHub.
+- [Quickstart](https://tickets.nullmenu.ai/docs/start/quickstart/): Start the server, create a pipeline, and run one task through it with curl.
+
+## Guides
+
+- [Pipelines and leases](https://tickets.nullmenu.ai/docs/guides/pipelines-and-leases/): Author FSM pipelines, understand lease ownership, retries, dependencies and assignments.
+- [Agent integration](https://tickets.nullmenu.ai/docs/guides/agent-integration/): Wire any agent runtime to the tracker contract — claim, events, transition or fail.
+
+## Reference
+
+- [API](https://tickets.nullmenu.ai/docs/reference/api/): Every endpoint — pipelines, tasks, leases, runs, artifacts, store, ops, OTLP.
+- [Configuration](https://tickets.nullmenu.ai/docs/reference/configuration/): CLI flags, the JSON config file, NULLTICKETS_HOME, and API token auth.
+
+## Source
+
+- [GitHub](https://github.com/nullclaw/nulltickets)
