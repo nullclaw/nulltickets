@@ -6,6 +6,7 @@ pub const home_env_var = "NULLTICKETS_HOME";
 pub const home_dir_name = ".nulltickets";
 
 pub const Config = struct {
+    host: []const u8 = "127.0.0.1",
     port: u16 = 7700,
     db: []const u8 = "nulltickets.db",
     api_token: ?[]const u8 = null,
@@ -73,6 +74,7 @@ fn getHomeDirOwned(allocator: std.mem.Allocator) ![]u8 {
 test "loadFromFile returns defaults when missing" {
     const cfg = try loadFromFile(std.testing.allocator, "nonexistent-config-file-12345.json");
     try std.testing.expectEqual(@as(u16, 7700), cfg.port);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.host);
     try std.testing.expectEqualStrings("nulltickets.db", cfg.db);
     try std.testing.expectEqual(@as(?[]const u8, null), cfg.api_token);
 }
@@ -85,6 +87,7 @@ test "loadFromFile reads config values" {
         .sub_path = "config.json",
         .data =
         \\{
+        \\  "host": "0.0.0.0",
         \\  "port": 7788,
         \\  "db": "tickets.db",
         \\  "api_token": "secret"
@@ -99,9 +102,34 @@ test "loadFromFile reads config values" {
     defer arena.deinit();
 
     const cfg = try loadFromFile(arena.allocator(), cfg_path);
+    try std.testing.expectEqualStrings("0.0.0.0", cfg.host);
     try std.testing.expectEqual(@as(u16, 7788), cfg.port);
     try std.testing.expectEqualStrings("tickets.db", cfg.db);
     try std.testing.expectEqualStrings("secret", cfg.api_token.?);
+}
+
+test "loadFromFile keeps default host when unset" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "config.json",
+        .data =
+        \\{
+        \\  "port": 7799
+        \\}
+        ,
+    });
+
+    const cfg_path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.json");
+    defer std.testing.allocator.free(cfg_path);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const cfg = try loadFromFile(arena.allocator(), cfg_path);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.host);
+    try std.testing.expectEqual(@as(u16, 7799), cfg.port);
 }
 
 test "resolveRelativePaths anchors db to config directory" {
