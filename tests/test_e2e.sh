@@ -415,6 +415,98 @@ RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
 CODE=$(echo "$RESP" | tail -1)
 assert_status 200 "$CODE" "Complete after retry"
 
+# ===== 7.1 Runs API: get / list / cancel =====
+echo ""
+echo "=== 7.1 Runs API (get/list/cancel) ==="
+RUNS_PIPELINE=$(cat <<'JSON'
+{
+  "name": "runs-api-e2e",
+  "definition": {
+    "initial": "work",
+    "states": { "work": { "agent_role": "worker" }, "done": { "terminal": true } },
+    "transitions": [ { "from": "work", "to": "done", "trigger": "complete" } ]
+  }
+}
+JSON
+)
+RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d "$RUNS_PIPELINE" "$BASE/pipelines")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 201 "$CODE" "POST /pipelines (runs-api-e2e)"
+RUNS_PIPELINE_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
+    -d "{\"pipeline_id\":\"$RUNS_PIPELINE_ID\",\"title\":\"Runs API Task\",\"description\":\"d\"}" \
+    "$BASE/tasks")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 201 "$CODE" "POST /tasks (runs-api-e2e)"
+
+RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
+    -d '{"agent_id":"worker-runs","agent_role":"worker"}' \
+    "$BASE/leases/claim")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "POST /leases/claim (runs-api-e2e)"
+RUNS_RUN_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['run']['id'])")
+
+# GET single run
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/runs/$RUNS_RUN_ID")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "GET /runs/{id}"
+assert_json "$BODY" "data['status']" "running" "run status"
+assert_json "$BODY" "data['agent_id']" "worker-runs" "run agent_id"
+assert_json "$BODY" "data['usage']" "{}" "run usage object"
+
+# GET unknown run
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/runs/does-not-exist")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 404 "$CODE" "GET /runs/{id} unknown -> 404"
+
+# GET list, filtered
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/runs?agent_id=worker-runs")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "GET /runs?agent_id=..."
+assert_json "$BODY" "str(len(data['items']))" "1" "runs list filtered by agent"
+
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/runs?status=running&limit=5")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "GET /runs?status=running"
+assert_json "$BODY" "any(i['id'] == '$RUNS_RUN_ID' for i in data['items'])" "True" "runs list includes new run"
+
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/runs?limit=0")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 400 "$CODE" "GET /runs limit=0 -> 400"
+
+# Cancel running run -> cancellation_requested_for_running + event
+RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
+    -d '{"note":"user pressed ctrl-c"}' \
+    "$BASE/runs/$RUNS_RUN_ID/cancel")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "POST /runs/{id}/cancel (running)"
+assert_json "$BODY" "data['outcome']" "cancellation_requested_for_running" "cancel outcome (running)"
+
+RESP=$(curl -s -w "\n%{http_code}" "$BASE/runs/$RUNS_RUN_ID/events")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "GET /runs/{id}/events after cancel"
+assert_json "$BODY" "any(e['kind'] == 'cancellation_requested' for e in data['items'])" "True" "cancellation_requested event present"
+
+# Cancel unknown run -> 404
+RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d '{}' "$BASE/runs/nope/cancel")
+CODE=$(echo "$RESP" | tail -1)
+assert_status 404 "$CODE" "POST /runs/{id}/cancel unknown -> 404"
+
+# Cancel terminal run -> already_terminal (RUN4 was failed earlier)
+RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -d '{}' "$BASE/runs/$RUN4_ID/cancel")
+CODE=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | sed '$d')
+assert_status 200 "$CODE" "POST /runs/{id}/cancel (terminal)"
+assert_json "$BODY" "data['outcome']" "already_terminal" "cancel outcome (terminal)"
+
 # ===== 8. Artifacts =====
 echo ""
 echo "=== 8. Artifacts ==="

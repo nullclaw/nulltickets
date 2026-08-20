@@ -66,6 +66,13 @@ pub const EventRow = struct {
     data_json: []const u8,
 };
 
+pub const CancelOutcome = enum {
+    cancelled_from_pending,
+    cancellation_requested_for_running,
+    already_terminal,
+    not_found,
+};
+
 pub const ArtifactRow = struct {
     id: []const u8,
     task_id: ?[]const u8,
@@ -800,6 +807,106 @@ pub const Store = struct {
         };
     }
 
+    pub fn getRun(self: *Self, run_id: []const u8) !?RunRow {
+        const stmt = try self.prepare("SELECT id, task_id, attempt, status, agent_id, agent_role, started_at_ms, ended_at_ms, usage_json, error_text FROM runs WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(stmt);
+        self.bindText(stmt, 1, run_id);
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+        return self.readRunRow(stmt);
+    }
+
+    pub fn listRuns(self: *Self, agent_id_filter: ?[]const u8, status_filter: ?[]const u8, limit: i64) ![]RunRow {
+        var sql_buf: [512]u8 = undefined;
+        var sql_len: usize = 0;
+        const base = "SELECT id, task_id, attempt, status, agent_id, agent_role, started_at_ms, ended_at_ms, usage_json, error_text FROM runs";
+        @memcpy(sql_buf[0..base.len], base);
+        sql_len = base.len;
+
+        var has_where = false;
+        if (agent_id_filter != null) {
+            const clause = " WHERE agent_id = ?";
+            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
+            sql_len += clause.len;
+            has_where = true;
+        }
+        if (status_filter != null) {
+            const clause = if (has_where) " AND status = ?" else " WHERE status = ?";
+            @memcpy(sql_buf[sql_len..][0..clause.len], clause);
+            sql_len += clause.len;
+            has_where = true;
+        }
+
+        const order = " ORDER BY started_at_ms DESC, id DESC LIMIT ?;";
+        @memcpy(sql_buf[sql_len..][0..order.len], order);
+        sql_len += order.len;
+        sql_buf[sql_len] = 0;
+        const sql_z: [*:0]const u8 = @ptrCast(sql_buf[0..sql_len :0]);
+
+        const stmt = try self.prepare(sql_z);
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var bind_idx: c_int = 1;
+        if (agent_id_filter) |af| {
+            self.bindText(stmt, bind_idx, af);
+            bind_idx += 1;
+        }
+        if (status_filter) |sf| {
+            self.bindText(stmt, bind_idx, sf);
+            bind_idx += 1;
+        }
+        _ = c.sqlite3_bind_int64(stmt, bind_idx, limit);
+
+        var rows: std.ArrayListUnmanaged(RunRow) = .empty;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            try rows.append(self.allocator, self.readRunRow(stmt));
+        }
+        return rows.toOwnedSlice(self.allocator);
+    }
+
+    pub fn cancelRun(self: *Self, run_id: []const u8, note: []const u8, event_data_json: []const u8) !CancelOutcome {
+        try self.execSimple("BEGIN IMMEDIATE;");
+        errdefer self.execSimple("ROLLBACK;") catch {};
+
+        const run_stmt = try self.prepare("SELECT status FROM runs WHERE id = ?;");
+        defer _ = c.sqlite3_finalize(run_stmt);
+        self.bindText(run_stmt, 1, run_id);
+        if (c.sqlite3_step(run_stmt) != c.SQLITE_ROW) {
+            self.execSimple("ROLLBACK;") catch {};
+            return CancelOutcome.not_found;
+        }
+        const status_view = self.colTextView(run_stmt, 0);
+
+        if (std.mem.eql(u8, status_view, "running")) {
+            // Not a status change: the executor polls run events, observes the
+            // cancellation_requested note, SIGTERMs, then transitions/fails.
+            _ = try self.addEvent(run_id, "cancellation_requested", event_data_json);
+            try self.execSimple("COMMIT;");
+            return CancelOutcome.cancellation_requested_for_running;
+        }
+
+        if (std.mem.eql(u8, status_view, "pending")) {
+            const now_ms = ids.nowMs();
+            const upd = try self.prepare("UPDATE runs SET status = 'cancelled', ended_at_ms = ?, error_text = ? WHERE id = ?;");
+            defer _ = c.sqlite3_finalize(upd);
+            _ = c.sqlite3_bind_int64(upd, 1, now_ms);
+            self.bindText(upd, 2, note);
+            self.bindText(upd, 3, run_id);
+            _ = c.sqlite3_step(upd);
+
+            const del = try self.prepare("DELETE FROM leases WHERE run_id = ?;");
+            defer _ = c.sqlite3_finalize(del);
+            self.bindText(del, 1, run_id);
+            _ = c.sqlite3_step(del);
+
+            try self.execSimple("COMMIT;");
+            return CancelOutcome.cancelled_from_pending;
+        }
+
+        // completed / failed / stale / cancelled
+        try self.execSimple("COMMIT;");
+        return CancelOutcome.already_terminal;
+    }
+
     pub fn listEventsPage(self: *Self, run_id: []const u8, cursor_id: ?i64, limit: i64) !EventPage {
         const page_limit: usize = @intCast(limit);
         const sql = if (cursor_id != null)
@@ -1484,6 +1591,11 @@ pub const Store = struct {
         if (row.agent_role) |agent_role| self.allocator.free(agent_role);
         self.allocator.free(row.usage_json);
         if (row.error_text) |error_text| self.allocator.free(error_text);
+    }
+
+    pub fn freeRunRows(self: *Self, rows: []RunRow) void {
+        for (rows) |row| self.freeRunRow(row);
+        self.allocator.free(rows);
     }
 
     pub fn freeClaimResult(self: *Self, claim: ClaimResult) void {
@@ -2527,4 +2639,156 @@ test "fail run with retry policy" {
     defer store.freeTaskRow(task_after_1);
     try std.testing.expect(task_after_1.next_eligible_at_ms > 0);
     try std.testing.expect(task_after_1.dead_letter_reason == null);
+}
+
+test "getRun returns null for unknown run" {
+    var store = try Store.init(std.testing.allocator, ":memory:");
+    defer store.deinit();
+    const run = try store.getRun("nope");
+    try std.testing.expect(run == null);
+}
+
+test "getRun and listRuns: filters, newest-first" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"work","states":{"work":{"agent_role":"worker"},"done":{"terminal":true}},"transitions":[{"from":"work","to":"done","trigger":"complete"}]}
+    ;
+    const pipeline_id = try store.createPipeline("runs-list-test", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    const t1 = try store.createTask(pipeline_id, "Task 1", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(t1);
+    const t2 = try store.createTask(pipeline_id, "Task 2", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(t2);
+
+    const c1 = (try store.claimTask("worker-a", "worker", 300_000, null)).?;
+    defer store.freeClaimResult(c1);
+    const c2 = (try store.claimTask("worker-b", "worker", 300_000, null)).?;
+    defer store.freeClaimResult(c2);
+
+    // getRun by id
+    const got = (try store.getRun(c1.run.id)).?;
+    defer store.freeRunRow(got);
+    try std.testing.expectEqualStrings(c1.run.id, got.id);
+    try std.testing.expectEqualStrings(t1, got.task_id);
+    try std.testing.expectEqualStrings("running", got.status);
+    try std.testing.expectEqualStrings("worker-a", got.agent_id.?);
+
+    // listRuns unfiltered: 2 items
+    const all = try store.listRuns(null, null, 50);
+    defer store.freeRunRows(all);
+    try std.testing.expectEqual(@as(usize, 2), all.items.len);
+
+    // filter by agent
+    const only_b = try store.listRuns("worker-b", null, 50);
+    defer store.freeRunRows(only_b);
+    try std.testing.expectEqual(@as(usize, 1), only_b.items.len);
+    try std.testing.expectEqualStrings(c2.run.id, only_b.items[0].id);
+
+    // filter by status
+    const running = try store.listRuns(null, "running", 50);
+    defer store.freeRunRows(running);
+    try std.testing.expectEqual(@as(usize, 2), running.items.len);
+
+    // limit
+    const limited = try store.listRuns(null, null, 1);
+    defer store.freeRunRows(limited);
+    try std.testing.expectEqual(@as(usize, 1), limited.items.len);
+
+    // newest-first: second claim started later (or same ms; id DESC tiebreak)
+    const newest = try store.listRuns(null, null, 50);
+    defer store.freeRunRows(newest);
+    const ms0 = newest.items[0].started_at_ms.?;
+    const ms1 = newest.items[1].started_at_ms.?;
+    try std.testing.expect(ms0 >= ms1);
+}
+
+test "cancelRun: running requests cancellation via event" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"work","states":{"work":{"agent_role":"worker"},"done":{"terminal":true}},"transitions":[{"from":"work","to":"done","trigger":"complete"}]}
+    ;
+    const pipeline_id = try store.createPipeline("cancel-running-test", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    const task_id = try store.createTask(pipeline_id, "Cancel Task", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(task_id);
+
+    const claim = (try store.claimTask("worker-a", "worker", 300_000, null)).?;
+    defer store.freeClaimResult(claim);
+
+    const outcome = try store.cancelRun(claim.run.id, "user asked to stop", "{\"note\":\"user asked to stop\"}");
+    try std.testing.expectEqual(CancelOutcome.cancellation_requested_for_running, outcome);
+
+    // status unchanged
+    const run = (try store.getRun(claim.run.id)).?;
+    defer store.freeRunRow(run);
+    try std.testing.expectEqualStrings("running", run.status);
+
+    // event visible to the executor poll
+    const events = try store.listEventsPage(claim.run.id, null, 10);
+    defer store.freeEventPage(events);
+    var found = false;
+    for (events.items) |e| {
+        if (std.mem.eql(u8, e.kind, "cancellation_requested")) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "cancelRun: pending cancels directly to terminal" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"work","states":{"work":{"agent_role":"worker"},"done":{"terminal":true}},"transitions":[{"from":"work","to":"done","trigger":"complete"}]}
+    ;
+    const pipeline_id = try store.createPipeline("cancel-pending-test", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    const task_id = try store.createTask(pipeline_id, "Pending Task", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(task_id);
+
+    // Runs are created at claim time as 'running'; a 'pending' run only exists if a
+    // producer creates one pre-claim. Simulate it directly.
+    try store.execSimple("INSERT INTO runs (id, task_id, attempt, status, started_at_ms) VALUES ('pending-run-1', 'does-not-exist-task', 1, 'pending', NULL);");
+    const outcome = try store.cancelRun("pending-run-1", "cancel before start", "{}");
+    try std.testing.expectEqual(CancelOutcome.cancelled_from_pending, outcome);
+
+    const run = (try store.getRun("pending-run-1")).?;
+    defer store.freeRunRow(run);
+    try std.testing.expectEqualStrings("cancelled", run.status);
+    try std.testing.expect(run.ended_at_ms != null);
+    try std.testing.expectEqualStrings("cancel before start", run.error_text.?);
+}
+
+test "cancelRun: terminal and unknown" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"work","states":{"work":{"agent_role":"worker"},"done":{"terminal":true}},"transitions":[{"from":"work","to":"done","trigger":"complete"}]}
+    ;
+    const pipeline_id = try store.createPipeline("cancel-terminal-test", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    const task_id = try store.createTask(pipeline_id, "Terminal Task", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(task_id);
+
+    const claim = (try store.claimTask("worker-a", "worker", 300_000, null)).?;
+    defer store.freeClaimResult(claim);
+    try store.failRun(claim.run.id, "boom", null);
+
+    const outcome = try store.cancelRun(claim.run.id, "late cancel", "{}");
+    try std.testing.expectEqual(CancelOutcome.already_terminal, outcome);
+
+    const unknown = try store.cancelRun("no-such-run", "x", "{}");
+    try std.testing.expectEqual(CancelOutcome.not_found, unknown);
 }

@@ -370,6 +370,65 @@
         }
       }
     },
+    "/runs": {
+      "get": {
+        "summary": "List runs (newest-first)",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "agent_id", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Filter by the agent that claimed the run (worker)" },
+          { "name": "status", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Filter by run status (running, completed, failed, stale, cancelled, pending)" },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 1000 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run list",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Run" } } }, "required": ["items"] } } }
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "401": { "$ref": "#/components/responses/Error401" }
+        }
+      }
+    },
+    "/runs/{id}": {
+      "get": {
+        "summary": "Get single run by id",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Run" } } }
+          },
+          "401": { "$ref": "#/components/responses/Error401" },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      }
+    },
+    "/runs/{id}/cancel": {
+      "post": {
+        "summary": "Request run cancellation",
+        "description": "Outcome-mapped cancel: pending runs transition directly to the terminal 'cancelled' status; running runs get a cancellation_requested event appended (the executor polls run events, observes it, and terminates the work); terminal runs report already_terminal.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": { "application/json": { "schema": { "type": "object", "properties": { "note": { "type": "string" } } } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Cancel outcome",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "outcome": { "type": "string", "enum": ["cancelled_from_pending", "cancellation_requested_for_running", "already_terminal"] } }, "required": ["outcome"] } } }
+          },
+          "400": { "$ref": "#/components/responses/Error400" },
+          "401": { "$ref": "#/components/responses/Error401" },
+          "404": { "$ref": "#/components/responses/Error404" }
+        }
+      }
+    },
     "/artifacts": {
       "post": {
         "summary": "Add artifact",
