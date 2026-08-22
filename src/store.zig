@@ -1312,7 +1312,7 @@ pub const Store = struct {
 
     // ===== Fail =====
 
-    pub fn failRun(self: *Self, run_id: []const u8, error_text: []const u8, usage_json: ?[]const u8) !void {
+    pub fn failRun(self: *Self, run_id: []const u8, error_text: []const u8, usage_json: ?[]const u8, force_dead_letter: bool) !void {
         try self.execSimple("BEGIN IMMEDIATE;");
         errdefer self.execSimple("ROLLBACK;") catch {};
 
@@ -1368,8 +1368,9 @@ pub const Store = struct {
                 fail_count = c.sqlite3_column_int64(cnt_stmt, 0);
             }
 
-            const exhausted = if (max_attempts) |limit| fail_count >= limit else false;
+            const exhausted = force_dead_letter or (if (max_attempts) |limit| fail_count >= limit else false);
             if (exhausted) {
+                const dead_letter_reason: []const u8 = if (force_dead_letter) "client_requested" else "max_attempts_exceeded";
                 var dead_stage_to_use: ?[]const u8 = null;
                 if (dead_letter_stage) |candidate| {
                     const pip_stmt = try self.prepare("SELECT definition_json FROM pipelines WHERE id = ?;");
@@ -1390,24 +1391,26 @@ pub const Store = struct {
 
                 const impossible_retry_ts: i64 = 9_223_372_036_854_775_000;
                 if (dead_stage_to_use) |stage| {
-                    const upd = try self.prepare("UPDATE tasks SET stage = ?, task_version = task_version + 1, dead_letter_reason = 'max_attempts_exceeded', next_eligible_at_ms = ?, updated_at_ms = ? WHERE id = ?;");
+                    const upd = try self.prepare("UPDATE tasks SET stage = ?, task_version = task_version + 1, dead_letter_reason = ?, next_eligible_at_ms = ?, updated_at_ms = ? WHERE id = ?;");
                     defer _ = c.sqlite3_finalize(upd);
                     self.bindText(upd, 1, stage);
+                    self.bindText(upd, 2, dead_letter_reason);
+                    _ = c.sqlite3_bind_int64(upd, 3, impossible_retry_ts);
+                    _ = c.sqlite3_bind_int64(upd, 4, now_ms);
+                    self.bindText(upd, 5, task_id);
+                    _ = c.sqlite3_step(upd);
+                } else {
+                    const upd = try self.prepare("UPDATE tasks SET dead_letter_reason = ?, next_eligible_at_ms = ?, updated_at_ms = ? WHERE id = ?;");
+                    defer _ = c.sqlite3_finalize(upd);
+                    self.bindText(upd, 1, dead_letter_reason);
                     _ = c.sqlite3_bind_int64(upd, 2, impossible_retry_ts);
                     _ = c.sqlite3_bind_int64(upd, 3, now_ms);
                     self.bindText(upd, 4, task_id);
                     _ = c.sqlite3_step(upd);
-                } else {
-                    const upd = try self.prepare("UPDATE tasks SET dead_letter_reason = 'max_attempts_exceeded', next_eligible_at_ms = ?, updated_at_ms = ? WHERE id = ?;");
-                    defer _ = c.sqlite3_finalize(upd);
-                    _ = c.sqlite3_bind_int64(upd, 1, impossible_retry_ts);
-                    _ = c.sqlite3_bind_int64(upd, 2, now_ms);
-                    self.bindText(upd, 3, task_id);
-                    _ = c.sqlite3_step(upd);
                 }
 
                 const evt_data = std.json.Stringify.valueAlloc(temp_alloc, .{
-                    .reason = "max_attempts_exceeded",
+                    .reason = dead_letter_reason,
                     .failed_attempts = fail_count,
                     .from_stage = current_stage,
                     .dead_letter_stage = dead_stage_to_use,
@@ -2422,7 +2425,7 @@ test "claim respects per-state concurrency limits" {
 
     // Set per-state concurrency limit of 2 for "review"
     var concurrency_map: std.json.ObjectMap = .empty;
-    defer concurrency_map.deinit();
+    defer concurrency_map.deinit(alloc);
     try concurrency_map.put(alloc, "review", .{ .integer = 2 });
     const per_state: std.json.Value = .{ .object = concurrency_map };
 
@@ -2520,11 +2523,66 @@ test "fail run with retry policy" {
     // First claim and fail
     const c1 = (try store.claimTask("agent-1", "worker", 300_000, null)).?;
     defer store.freeClaimResult(c1);
-    try store.failRun(c1.run.id, "error 1", null);
+    try store.failRun(c1.run.id, "error 1", null, false);
 
     // Task should have next_eligible_at_ms set (retry delay)
     const task_after_1 = (try store.getTask(task_id)).?;
     defer store.freeTaskRow(task_after_1);
     try std.testing.expect(task_after_1.next_eligible_at_ms > 0);
     try std.testing.expect(task_after_1.dead_letter_reason == null);
+}
+
+test "forced dead-letter bypasses missing max_attempts" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"process","states":{"process":{"agent_role":"worker"},"done":{"terminal":true}},"transitions":[{"from":"process","to":"done","trigger":"complete"}]}
+    ;
+
+    const pipeline_id = try store.createPipeline("forced-dead-letter-test", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    // max_attempts NULL — normal path would retry forever
+    const task_id = try store.createTask(pipeline_id, "Config Error Task", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(task_id);
+
+    const c1 = (try store.claimTask("agent-1", "worker", 300_000, null)).?;
+    defer store.freeClaimResult(c1);
+    try store.failRun(c1.run.id, "no workflow for pipeline", null, true);
+
+    const task_after = (try store.getTask(task_id)).?;
+    defer store.freeTaskRow(task_after);
+    try std.testing.expectEqualStrings("client_requested", task_after.dead_letter_reason.?);
+    try std.testing.expect(task_after.next_eligible_at_ms > 9_000_000_000_000_000_000);
+
+    // Dead-lettered task is not claimable
+    const reclaim = try store.claimTask("agent-1", "worker", 300_000, null);
+    try std.testing.expect(reclaim == null);
+}
+
+test "unflagged failRun with max_attempts NULL schedules retry" {
+    const alloc = std.testing.allocator;
+    var store = try Store.init(alloc, ":memory:");
+    defer store.deinit();
+
+    const pipeline_def =
+        \\{"initial":"process","states":{"process":{"agent_role":"worker"},"done":{"terminal":true}},"transitions":[{"from":"process","to":"done","trigger":"complete"}]}
+    ;
+
+    const pipeline_id = try store.createPipeline("unflagged-retry-test", pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+
+    const task_id = try store.createTask(pipeline_id, "Retry Task", "desc", 0, "{}", null, 500, null);
+    defer store.freeOwnedString(task_id);
+
+    const c1 = (try store.claimTask("agent-1", "worker", 300_000, null)).?;
+    defer store.freeClaimResult(c1);
+    try store.failRun(c1.run.id, "error 1", null, false);
+
+    const task_after = (try store.getTask(task_id)).?;
+    defer store.freeTaskRow(task_after);
+    try std.testing.expect(task_after.dead_letter_reason == null);
+    try std.testing.expect(task_after.next_eligible_at_ms > 0);
 }
