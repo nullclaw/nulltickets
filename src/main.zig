@@ -233,3 +233,11 @@ fn readHttpRequest(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, max
 
     return try allocator.dupe(u8, buffer.items[0..required]);
 }
+
+// Pull module test declarations into the test build (zig build test).
+test {
+    _ = @import("store.zig");
+    _ = @import("api.zig");
+    _ = @import("domain.zig");
+    _ = @import("config.zig");
+}
