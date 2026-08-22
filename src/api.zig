@@ -244,8 +244,24 @@ pub fn handleRequest(
         }
     }
 
+    // Runs (collection)
+    if (eql(seg0, "runs") and seg1 == null) {
+        if (is_get) {
+            response = handleListRuns(ctx, path.query);
+            return response;
+        }
+    }
+
     // Runs
     if (eql(seg0, "runs") and seg1 != null) {
+        if (is_get and seg2 == null) {
+            response = handleGetRun(ctx, seg1.?);
+            return response;
+        }
+        if (is_post and eql(seg2, "cancel")) {
+            response = handleCancelRun(ctx, seg1.?, body);
+            return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
+        }
         if (is_post and eql(seg2, "events")) {
             response = handleAddEvent(ctx, seg1.?, body, raw_request);
             return finalizeWithIdempotency(ctx, method, path.path, idempotency, response);
@@ -916,6 +932,83 @@ fn handleListEvents(ctx: *Context, run_id: []const u8, query: ?[]const u8) HttpR
     w.writeAll("}") catch return serverError(ctx.allocator);
 
     return .{ .status = "200 OK", .body = out.written() };
+}
+
+fn handleGetRun(ctx: *Context, run_id: []const u8) HttpResponse {
+    const run = (ctx.store.getRun(run_id) catch return serverError(ctx.allocator)) orelse {
+        return respondError(ctx.allocator, 404, "not_found", "Run not found");
+    };
+    defer ctx.store.freeRunRow(run);
+
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &out.writer;
+    w.writeAll("{") catch return serverError(ctx.allocator);
+    writeRunFields(w, ctx.allocator, run) catch return serverError(ctx.allocator);
+    w.print(",\"usage\":{s}", .{run.usage_json}) catch return serverError(ctx.allocator);
+    if (run.error_text) |error_text| {
+        w.writeAll(",") catch return serverError(ctx.allocator);
+        writeStringField(w, ctx.allocator, "error_text", error_text) catch return serverError(ctx.allocator);
+    } else {
+        w.writeAll(",\"error_text\":null") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("}") catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = out.written() };
+}
+
+fn handleListRuns(ctx: *Context, query: ?[]const u8) HttpResponse {
+    const agent_id = parseQueryParam(query, "agent_id");
+    const status = parseQueryParam(query, "status");
+    const limit_str = parseQueryParam(query, "limit");
+    const limit = if (limit_str) |ls| (std.fmt.parseInt(i64, ls, 10) catch 50) else 50;
+    if (limit <= 0 or limit > 1000) {
+        return respondError(ctx.allocator, 400, "invalid_limit", "limit must be between 1 and 1000");
+    }
+
+    const items = ctx.store.listRuns(agent_id, status, limit) catch return serverError(ctx.allocator);
+    defer ctx.store.freeRunRows(items);
+
+    var out: std.Io.Writer.Allocating = .init(ctx.allocator);
+    const w = &out.writer;
+    w.writeAll("{\"items\":[") catch return serverError(ctx.allocator);
+    for (items, 0..) |run, i| {
+        if (i > 0) w.writeAll(",") catch return serverError(ctx.allocator);
+        w.writeAll("{") catch return serverError(ctx.allocator);
+        writeRunFields(w, ctx.allocator, run) catch return serverError(ctx.allocator);
+        w.print(",\"usage\":{s}", .{run.usage_json}) catch return serverError(ctx.allocator);
+        if (run.error_text) |error_text| {
+            w.writeAll(",") catch return serverError(ctx.allocator);
+            writeStringField(w, ctx.allocator, "error_text", error_text) catch return serverError(ctx.allocator);
+        } else {
+            w.writeAll(",\"error_text\":null") catch return serverError(ctx.allocator);
+        }
+        w.writeAll("}") catch return serverError(ctx.allocator);
+    }
+    w.writeAll("]}") catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = out.written() };
+}
+
+fn handleCancelRun(ctx: *Context, run_id: []const u8, body: []const u8) HttpResponse {
+    var parsed = std.json.parseFromSlice(struct {
+        note: ?[]const u8 = null,
+    }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
+        return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
+    };
+    defer parsed.deinit();
+    const note = parsed.value.note orelse "cancel requested";
+
+    var note_obj: std.json.ObjectMap = .empty;
+    note_obj.put(ctx.allocator, "note", .{ .string = note }) catch return serverError(ctx.allocator);
+    const data_json = jsonStringify(ctx.allocator, .{ .object = note_obj }) catch return serverError(ctx.allocator);
+
+    const outcome = ctx.store.cancelRun(run_id, note, data_json) catch return serverError(ctx.allocator);
+    const outcome_str: []const u8 = switch (outcome) {
+        .cancelled_from_pending => "cancelled_from_pending",
+        .cancellation_requested_for_running => "cancellation_requested_for_running",
+        .already_terminal => "already_terminal",
+        .not_found => return respondError(ctx.allocator, 404, "not_found", "Run not found"),
+    };
+    const resp = std.fmt.allocPrint(ctx.allocator, "{{\"outcome\":\"{s}\"}}", .{outcome_str}) catch return serverError(ctx.allocator);
+    return .{ .status = "200 OK", .body = resp };
 }
 
 fn handleTransition(ctx: *Context, run_id: []const u8, body: []const u8, raw_request: []const u8) HttpResponse {
@@ -1825,4 +1918,142 @@ test "store search rejects excessive limit" {
     );
     try std.testing.expectEqualStrings("400 Bad Request", resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"invalid_limit\"") != null);
+}
+
+fn setupRunWithArena(arena: std.mem.Allocator, store: *Store, pipeline_name: []const u8, agent_id: []const u8) ![]const u8 {
+    const pipeline_def =
+        \\{"initial":"work","states":{"work":{"agent_role":"worker"},"done":{"terminal":true}},"transitions":[{"from":"work","to":"done","trigger":"complete"}]}
+    ;
+    var name_buf: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "{s}", .{pipeline_name});
+    const pipeline_id = try store.createPipeline(name, pipeline_def);
+    defer store.freeOwnedString(pipeline_id);
+    const task_id = try store.createTask(pipeline_id, "Task", "desc", 0, "{}", null, 0, null);
+    defer store.freeOwnedString(task_id);
+    const claim = (try store.claimTask(agent_id, "worker", 300_000, null)).?;
+    defer store.freeClaimResult(claim);
+    return arena.dupe(u8, claim.run.id);
+}
+
+test "runs API: GET /runs/{id} returns run or 404" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const run_id = try setupRunWithArena(arena.allocator(), &store, "get-run-test", "worker-1");
+
+    const target = try std.fmt.allocPrint(arena.allocator(), "/runs/{s}", .{run_id});
+    const raw = try std.fmt.allocPrint(arena.allocator(), "GET {s} HTTP/1.1\r\n\r\n", .{target});
+    const resp = handleRequest(&ctx, "GET", target, "", raw);
+    try std.testing.expectEqualStrings("200 OK", resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"status\":\"running\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"agent_id\":\"worker-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"usage\":{}") != null);
+
+    const missing_resp = handleRequest(&ctx, "GET", "/runs/nope", "", "GET /runs/nope HTTP/1.1\r\n\r\n");
+    try std.testing.expectEqualStrings("404 Not Found", missing_resp.status);
+}
+
+test "runs API: GET /runs filters by agent_id, status, limit" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    _ = try setupRunWithArena(arena.allocator(), &store, "list-runs-test-a", "worker-a");
+    _ = try setupRunWithArena(arena.allocator(), &store, "list-runs-test-b", "worker-b");
+
+    const all_resp = handleRequest(&ctx, "GET", "/runs", "", "GET /runs HTTP/1.1\r\n\r\n");
+    try std.testing.expectEqualStrings("200 OK", all_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, all_resp.body, "\"items\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, all_resp.body, "\"agent_id\":\"worker-a\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, all_resp.body, "\"agent_id\":\"worker-b\"") != null);
+
+    const filtered_resp = handleRequest(&ctx, "GET", "/runs?agent_id=worker-b", "", "GET /runs?agent_id=worker-b HTTP/1.1\r\n\r\n");
+    try std.testing.expectEqualStrings("200 OK", filtered_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, filtered_resp.body, "worker-a") == null);
+
+    const status_resp = handleRequest(&ctx, "GET", "/runs?status=running", "", "GET /runs?status=running HTTP/1.1\r\n\r\n");
+    try std.testing.expectEqualStrings("200 OK", status_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, status_resp.body, "\"status\":\"running\"") != null);
+
+    const bad_limit = handleRequest(&ctx, "GET", "/runs?limit=1001", "", "GET /runs?limit=1001 HTTP/1.1\r\n\r\n");
+    try std.testing.expectEqualStrings("400 Bad Request", bad_limit.status);
+}
+
+test "runs API: POST /runs/{id}/cancel outcome mapping" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = arena.allocator(),
+    };
+
+    const run_id = try setupRunWithArena(arena.allocator(), &store, "cancel-api-test", "worker-1");
+
+    // running -> cancellation_requested_for_running
+    const cancel_body = "{\"note\":\"user asked to stop\"}";
+    var target_buf: [128]u8 = undefined;
+    var raw_buf: [192]u8 = undefined;
+    const target = try std.fmt.bufPrint(&target_buf, "/runs/{s}/cancel", .{run_id});
+    const raw = try std.fmt.bufPrint(&raw_buf, "POST {s} HTTP/1.1\r\n\r\n", .{target});
+    const cancel_resp = handleRequest(&ctx, "POST", target, cancel_body, raw);
+    try std.testing.expectEqualStrings("200 OK", cancel_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, cancel_resp.body, "\"outcome\":\"cancellation_requested_for_running\"") != null);
+
+    // run stays running; executor polls events for the note
+    const events_target = try std.fmt.allocPrint(arena.allocator(), "/runs/{s}/events", .{run_id});
+    const events_raw = try std.fmt.allocPrint(arena.allocator(), "GET {s} HTTP/1.1\r\n\r\n", .{events_target});
+    const events_resp = handleRequest(&ctx, "GET", events_target, "", events_raw);
+    try std.testing.expectEqualStrings("200 OK", events_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, events_resp.body, "\"kind\":\"cancellation_requested\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, events_resp.body, "user asked to stop") != null);
+
+    // terminal -> already_terminal
+    try store.failRun(run_id, "boom", null);
+    const late_resp = handleRequest(&ctx, "POST", target, "{}", raw);
+    try std.testing.expectEqualStrings("200 OK", late_resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, late_resp.body, "\"outcome\":\"already_terminal\"") != null);
+
+    // unknown -> 404
+    const missing_resp = handleRequest(&ctx, "POST", "/runs/nope/cancel", "{}", "POST /runs/nope/cancel HTTP/1.1\r\n\r\n");
+    try std.testing.expectEqualStrings("404 Not Found", missing_resp.status);
+}
+
+test "runs API: GET /runs/{id} requires admin token when configured" {
+    const allocator = std.testing.allocator;
+    var store = try Store.init(allocator, ":memory:");
+    defer store.deinit();
+
+    var ctx = Context{
+        .store = &store,
+        .allocator = allocator,
+        .required_api_token = "secret",
+    };
+
+    const no_token = handleRequest(&ctx, "GET", "/runs/some-id", "", "GET /runs/some-id HTTP/1.1\r\n\r\n");
+    try std.testing.expectEqualStrings("401 Unauthorized", no_token.status);
+
+    const with_token = handleRequest(&ctx, "GET", "/runs/some-id", "", "GET /runs/some-id HTTP/1.1\r\nAuthorization: Bearer secret\r\n\r\n");
+    try std.testing.expectEqualStrings("404 Not Found", with_token.status);
 }
