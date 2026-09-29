@@ -2422,7 +2422,7 @@ test "claim respects per-state concurrency limits" {
 
     // Set per-state concurrency limit of 2 for "review"
     var concurrency_map: std.json.ObjectMap = .empty;
-    defer concurrency_map.deinit();
+    defer concurrency_map.deinit(alloc);
     try concurrency_map.put(alloc, "review", .{ .integer = 2 });
     const per_state: std.json.Value = .{ .object = concurrency_map };
 

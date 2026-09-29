@@ -1692,12 +1692,14 @@ fn serverError(allocator: std.mem.Allocator) HttpResponse {
 }
 
 test "auth allows health without API token" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     var store = try Store.init(std.testing.allocator, ":memory:");
     defer store.deinit();
 
     var ctx = Context{
         .store = &store,
-        .allocator = std.testing.allocator,
+        .allocator = arena.allocator(),
         .required_api_token = "secret",
     };
 
@@ -1706,12 +1708,14 @@ test "auth allows health without API token" {
 }
 
 test "auth rejects protected endpoint without API token" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     var store = try Store.init(std.testing.allocator, ":memory:");
     defer store.deinit();
 
     var ctx = Context{
         .store = &store,
-        .allocator = std.testing.allocator,
+        .allocator = arena.allocator(),
         .required_api_token = "secret",
     };
 
@@ -1720,12 +1724,14 @@ test "auth rejects protected endpoint without API token" {
 }
 
 test "auth accepts admin token for protected endpoint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     var store = try Store.init(std.testing.allocator, ":memory:");
     defer store.deinit();
 
     var ctx = Context{
         .store = &store,
-        .allocator = std.testing.allocator,
+        .allocator = arena.allocator(),
         .required_api_token = "secret",
     };
 
