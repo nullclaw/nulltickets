@@ -33,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var port_override: ?u16 = null;
+    var host_override: ?[]const u8 = null;
     var db_override: ?[:0]const u8 = null;
     var token_override: ?[]const u8 = null;
     var config_path_override: ?[]const u8 = null;
@@ -48,6 +49,11 @@ pub fn main(init: std.process.Init) !void {
                     std.debug.print("invalid port: {s}\n", .{val});
                     return;
                 };
+            }
+        } else if (std.mem.eql(u8, arg, "--host")) {
+            if (arg_index + 1 < args.len) {
+                arg_index += 1;
+                host_override = args[arg_index];
             }
         } else if (std.mem.eql(u8, arg, "--db")) {
             if (arg_index + 1 < args.len) {
@@ -115,17 +121,18 @@ pub fn main(init: std.process.Init) !void {
     var store = try Store.init(allocator, db_path);
     defer store.deinit();
 
-    const addr = std.Io.net.IpAddress.resolve(std_compat.io(), "127.0.0.1", port) catch |err| {
+    const bind_host = host_override orelse (if (cfg.host.len > 0) cfg.host else "127.0.0.1");
+    const addr = std.Io.net.IpAddress.resolve(std_compat.io(), bind_host, port) catch |err| {
         std.debug.print("failed to resolve address: {}\n", .{err});
         return;
     };
     var server = addr.listen(std_compat.io(), .{ .reuse_address = true }) catch |err| {
-        std.debug.print("failed to listen on port {d}: {}\n", .{ port, err });
+        std.debug.print("failed to listen on {s}:{d}: {}\n", .{ bind_host, port, err });
         return;
     };
     defer server.deinit(std_compat.io());
 
-    std.debug.print("listening on http://127.0.0.1:{d}\n", .{port});
+    std.debug.print("listening on http://{s}:{d}\n", .{ bind_host, port });
 
     while (true) {
         var conn = server.accept(std_compat.io()) catch |err| {
