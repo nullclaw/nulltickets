@@ -112,7 +112,7 @@ test "loadFromFile keeps default host when unset" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try std_compat.fs.Dir.wrap(tmp.dir).writeFile(.{
         .sub_path = "config.json",
         .data =
         \\{
@@ -121,7 +121,7 @@ test "loadFromFile keeps default host when unset" {
         ,
     });
 
-    const cfg_path = try tmp.dir.realpathAlloc(std.testing.allocator, "config.json");
+    const cfg_path = try std_compat.fs.Dir.wrap(tmp.dir).realpathAlloc(std.testing.allocator, "config.json");
     defer std.testing.allocator.free(cfg_path);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
