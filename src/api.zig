@@ -985,6 +985,7 @@ fn handleFail(ctx: *Context, run_id: []const u8, body: []const u8, raw_request: 
     var parsed = std.json.parseFromSlice(struct {
         @"error": []const u8,
         usage: ?std.json.Value = null,
+        dead_letter: bool = false,
     }, ctx.allocator, body, .{ .ignore_unknown_fields = true }) catch {
         return respondError(ctx.allocator, 400, "invalid_json", "Invalid JSON body");
     };
@@ -992,7 +993,7 @@ fn handleFail(ctx: *Context, run_id: []const u8, body: []const u8, raw_request: 
     const req = parsed.value;
     const usage_json = if (req.usage) |u| (jsonStringify(ctx.allocator, u) catch null) else null;
 
-    ctx.store.failRun(run_id, req.@"error", usage_json) catch return serverError(ctx.allocator);
+    ctx.store.failRun(run_id, req.@"error", usage_json, req.dead_letter) catch return serverError(ctx.allocator);
 
     return .{ .status = "200 OK", .body = "{\"status\":\"failed\"}" };
 }
